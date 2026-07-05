@@ -1,0 +1,325 @@
+#!/usr/bin/env bash
+# hooks/pre-commit — runs before every `git commit`.
+# Fast checks on what you're about to commit.  Exits 0 to allow; non-zero to block.
+#
+# This is your first line of defence — catches stuff before it even gets staged.
+
+set -euo pipefail
+
+# ─── TTY detection ─────────────────────────────────────────────
+INTERACTIVE=false
+[ -t 0 ] && INTERACTIVE=true
+
+# ─── Colors ────────────────────────────────────────────────────
+if [ -t 1 ]; then
+    RED='\033[0;31m'      GREEN='\033[0;32m'    YELLOW='\033[1;33m'
+    CYAN='\033[0;36m'     BOLD='\033[1m'        DIM='\033[2m'
+    NC='\033[0m'
+else
+    RED='' GREEN='' YELLOW='' CYAN='' BOLD='' DIM='' NC=''
+fi
+
+# ─── State ─────────────────────────────────────────────────────
+BLOCK_COMMIT=false
+FOUND_ANYTHING=false
+
+# ─── Helpers ───────────────────────────────────────────────────
+section()   { printf "\n${BOLD}${CYAN}━━━ %s ━━━${NC}\n" "$*"; }
+pass()      { printf "  ${GREEN}✓${NC} %s\n" "$*"; }
+fail()      { printf "  ${RED}✗${NC} %s\n" "$*"; }
+warn()      { printf "  ${YELLOW}⚠${NC}  %s\n" "$*"; }
+info()      { printf "  ${DIM}→${NC} %s\n" "$*"; }
+
+ask() {
+    local prompt="$1"
+    local default="${2:-N}"
+    if $INTERACTIVE; then
+        local hint
+        [ "$default" = "Y" ] && hint="Y/n" || hint="y/N"
+        printf "  ${YELLOW}?${NC} ${prompt} ${DIM}[${hint}]${NC} "
+        read -r answer
+        answer="${answer:-$default}"
+        case "${answer,,}" in y|yes) return 0 ;; *) return 1 ;; esac
+    else
+        echo "  ${DIM}→${NC} ${prompt}  ${DIM}(non-interactive — proceeding)${NC}"
+        return 0
+    fi
+}
+
+# ─── SCANS ─────────────────────────────────────────────────────
+
+scan_secrets() {
+    section "Secrets  (API keys, tokens, passwords…)"
+
+    local patterns=(
+        '[a-zA-Z0-9_]*[_-]?(api[_-]?key|apikey|API_KEY)\s*[=:]\s*['\''"][a-zA-Z0-9_\-]{12,}['\''"]'
+        '[a-zA-Z0-9_]*[_-]?(secret|SECRET)\s*[=:]\s*['\''"][a-zA-Z0-9_\-]{8,}['\''"]'
+        '[a-zA-Z0-9_]*[_-]?(token|TOKEN|access_token)\s*[=:]\s*['\''"][a-zA-Z0-9_\-.]{12,}['\''"]'
+        '[a-zA-Z0-9_]*[_-]?(password|PASSWORD|passwd)\s*[=:]\s*['\''"][^'\''"]{4,}['\''"]'
+        'sk-[a-zA-Z0-9]{20,}' 'ghp_[a-zA-Z0-9]{36}' 'github_pat_[a-zA-Z0-9_]{22,}'
+        'AKIA[0-9A-Z]{16}' 'xox[baprs]-[0-9a-zA-Z-]{10,}'
+    )
+
+    local hits=0
+    for pattern in "${patterns[@]}"; do
+        while IFS= read -r line; do
+            [ -z "$line" ] && continue
+            hits=$((hits + 1))
+            [ "$hits" -eq 1 ] && warn "Possible secrets found:"
+            printf "    ${RED}→${NC} %s\n" "$line"
+        done < <(git diff --cached --unified=0 2>/dev/null | grep -iE "$pattern" || true)
+    done
+
+    if [ "$hits" -gt 0 ]; then
+        FOUND_ANYTHING=true
+        ask "Secrets detected! Commit anyway?" || BLOCK_COMMIT=true
+    else
+        pass "Clean"
+    fi
+}
+
+scan_sensitive_files() {
+    section "Sensitive files  (.env, keys, certs…)"
+
+    local patterns=(
+        '\.env$' '\.env\.' 'credentials\.json$' '\.pem$' '\.key$'
+        '\.pfx$' '\.p12$' 'id_rsa' 'id_ed25519' 'id_ecdsa'
+        'privatekey' '\.htpasswd$' 'secrets\.ya?ml$' 'secrets\.json$'
+    )
+
+    local hits=0
+    local files
+    files=$(git diff --cached --name-only --diff-filter=A 2>/dev/null || true)
+
+    for f in $files; do
+        local name=$(basename "$f")
+        for pat in "${patterns[@]}"; do
+            if [[ "$name" =~ $pat ]]; then
+                hits=$((hits + 1))
+                [ "$hits" -eq 1 ] && warn "New sensitive-looking files staged:"
+                printf "    ${RED}→${NC} %s\n" "$f"
+                break
+            fi
+        done
+    done
+
+    if [ "$hits" -gt 0 ]; then
+        FOUND_ANYTHING=true
+        ask "$hits sensitive file(s). Commit anyway?" || BLOCK_COMMIT=true
+    else
+        pass "Clean"
+    fi
+}
+
+scan_large_files() {
+    section "Large files  (≥ 1 MB)"
+
+    local threshold=1048576
+    local hits=0
+
+    while IFS= read -r line; do
+        [ -z "$line" ] && continue
+        local sha=$(echo "$line" | awk '{print $4}')
+        local path=$(echo "$line" | cut -f2)
+        local size=$(git cat-file -s "$sha" 2>/dev/null || echo 0)
+        if [ "$size" -gt "$threshold" ]; then
+            hits=$((hits + 1))
+            [ "$hits" -eq 1 ] && warn "Large files staged:"
+            printf "    ${YELLOW}→${NC} %s  ${DIM}(%s)${NC}\n" "$path" "$(numfmt --to=iec "$size" 2>/dev/null || echo "${size}B")"
+        fi
+    done < <(git diff --cached --diff-filter=A --raw 2>/dev/null || true)
+
+    if [ "$hits" -gt 0 ]; then
+        FOUND_ANYTHING=true
+        ask "Large files. Commit anyway?" || BLOCK_COMMIT=true
+    else
+        pass "Clean"
+    fi
+}
+
+scan_merge_conflicts() {
+    section "Merge conflict markers"
+
+    local hits=0
+    while IFS= read -r line; do
+        [ -z "$line" ] && continue
+        hits=$((hits + 1))
+        [ "$hits" -eq 1 ] && fail "Leftover merge-conflict markers:"
+        printf "    ${RED}→${NC} %s\n" "$line"
+    done < <(git diff --cached -U0 2>/dev/null | grep -nE '^(\+<<<<<<<|\+=======|\+>>>>>>>)' || true)
+
+    if [ "$hits" -gt 0 ]; then
+        BLOCK_COMMIT=true
+        fail "Resolve merge conflicts before committing."
+    else
+        pass "Clean"
+    fi
+}
+
+scan_debug_prints() {
+    section "Debug prints  (console.log, println!, dbg!, print())"
+
+    local hits=0
+    while IFS= read -r line; do
+        [ -z "$line" ] && continue
+        hits=$((hits + 1))
+        [ "$hits" -eq 1 ] && warn "Debug output in staged changes:"
+        printf "    ${YELLOW}→${NC} %s\n" "$line"
+    done < <(git diff --cached -U0 2>/dev/null | grep -nE '^\+\s*(console\.(log|debug|warn)|println!|dbg!|print\(|printf\(|echo |var_dump|dump\()' || true)
+
+    if [ "$hits" -gt 0 ]; then
+        FOUND_ANYTHING=true
+        ask "Debug prints. Commit anyway?" || BLOCK_COMMIT=true
+    else
+        pass "Clean"
+    fi
+}
+
+scan_trailing_whitespace() {
+    section "Trailing whitespace"
+
+    local hits=0
+    while IFS= read -r line; do
+        [ -z "$line" ] && continue
+        hits=$((hits + 1))
+        [ "$hits" -eq 1 ] && warn "Trailing whitespace found:"
+        printf "    ${DIM}→${NC} %s\n" "$line"
+    done < <(git diff --cached -U0 2>/dev/null | grep -nE '^\+\s+$' || true)
+
+    if [ "$hits" -gt 0 ]; then
+        FOUND_ANYTHING=true
+        if ask "Trailing whitespace found. Strip it now?"; then
+            local files=$(git diff --cached --name-only 2>/dev/null)
+            for f in $files; do
+                [ ! -f "$f" ] && continue
+                sed -i 's/[[:space:]]*$//' "$f" 2>/dev/null || true
+            done
+            git add $files 2>/dev/null || true
+            pass "Whitespace stripped"
+        fi
+    else
+        pass "Clean"
+    fi
+}
+
+scan_lockfile_sync() {
+    section "Lockfile drift  (manifest changed, lockfile didn't)"
+
+    local changed=$(git diff --cached --name-only 2>/dev/null || true)
+    local hit=false
+
+    if echo "$changed" | grep -q '^Cargo\.toml$' && ! echo "$changed" | grep -q '^Cargo\.lock$'; then
+        warn "Cargo.toml changed but Cargo.lock was NOT updated"; hit=true; fi
+    if echo "$changed" | grep -q '^package\.json$' && ! echo "$changed" | grep -q '^package-lock\.json$'; then
+        warn "package.json changed but package-lock.json was NOT updated"; hit=true; fi
+    if echo "$changed" | grep -qE '^(pyproject\.toml|setup\.cfg|setup\.py)$' && ! echo "$changed" | grep -qE '(requirements.*\.txt|poetry\.lock|Pipfile\.lock)$'; then
+        warn "Python deps changed but no lockfile update detected"; hit=true; fi
+    if echo "$changed" | grep -q '^go\.mod$' && ! echo "$changed" | grep -q '^go\.sum$'; then
+        warn "go.mod changed but go.sum was NOT updated"; hit=true; fi
+
+    if $hit; then
+        FOUND_ANYTHING=true
+        ask "Lockfile drift. Commit anyway?" || BLOCK_COMMIT=true
+    else
+        pass "Clean"
+    fi
+}
+
+scan_hardcoded_connections() {
+    section "Hardcoded connections  (DB URLs, IPs…)"
+
+    local patterns=(
+        '(postgres|mysql|mongodb|redis|sqlite)://[^[:space:]]+'
+        '[a-z]+://[^@]+@[^[:space:]]+'
+        'jdbc:[^[:space:]]+'
+        '\b([0-9]{1,3}\.){3}[0-9]{1,3}\b'
+    )
+
+    local hits=0
+    for pattern in "${patterns[@]}"; do
+        while IFS= read -r line; do
+            [ -z "$line" ] && continue
+            hits=$((hits + 1))
+            [ "$hits" -eq 1 ] && warn "Hardcoded connections / IPs:"
+            printf "    ${YELLOW}→${NC} %s\n" "$(echo "$line" | cut -c1-120)"
+        done < <(git diff --cached -U0 2>/dev/null | grep -nE "$pattern" | grep -vE '(localhost|127\.0\.0\.1|0\.0\.0\.0|::1)' || true)
+    done
+
+    if [ "$hits" -gt 0 ]; then
+        FOUND_ANYTHING=true
+        ask "Hardcoded connections. Commit anyway?" || BLOCK_COMMIT=true
+    else
+        pass "Clean"
+    fi
+}
+
+scan_absolute_paths() {
+    section "Absolute paths  (/home/… that break elsewhere)"
+
+    local hits=0
+    while IFS= read -r line; do
+        [ -z "$line" ] && continue
+        hits=$((hits + 1))
+        [ "$hits" -eq 1 ] && warn "Absolute paths in staged changes:"
+        printf "    ${YELLOW}→${NC} %s\n" "$line"
+    done < <(git diff --cached -U0 2>/dev/null | grep -nE '^\+.*(/home/|/Users/|/tmp/|/var/)' | grep -v '^\+\+\+' || true)
+
+    if [ "$hits" -gt 0 ]; then
+        FOUND_ANYTHING=true
+        ask "Absolute paths. Commit anyway?" || BLOCK_COMMIT=true
+    else
+        pass "Clean"
+    fi
+}
+
+scan_todos() {
+    section "TODO / FIXME / HACK markers"
+
+    local hits=0
+    while IFS= read -r line; do
+        [ -z "$line" ] && continue
+        hits=$((hits + 1))
+        [ "$hits" -eq 1 ] && info "You left these behind:"
+        printf "    ${DIM}→${NC} %s\n" "$line"
+    done < <(git diff --cached -U0 2>/dev/null | grep -nE '^\+\s*(TODO|FIXME|HACK|XXX|TEMP|WORKAROUND)' || true)
+
+    if [ "$hits" -gt 0 ]; then
+        FOUND_ANYTHING=true
+        ask "$hits marker(s). Commit anyway?" || BLOCK_COMMIT=true
+    else
+        pass "Clean"
+    fi
+}
+
+# ─── MAIN ──────────────────────────────────────────────────────
+
+echo ""
+printf "${BOLD}${CYAN}  pre-commit scan…${NC}\n"
+echo ""
+
+scan_secrets
+scan_sensitive_files
+scan_large_files
+scan_merge_conflicts
+scan_debug_prints
+scan_trailing_whitespace
+scan_lockfile_sync
+scan_hardcoded_connections
+scan_absolute_paths
+scan_todos
+
+echo ""
+if $BLOCK_COMMIT; then
+    printf "${BOLD}${RED}  COMMIT BLOCKED${NC}\n"
+    printf "  ${DIM}Fix the issues above and try again.${NC}\n\n"
+    exit 1
+fi
+
+if $FOUND_ANYTHING; then
+    printf "${BOLD}${GREEN}  COMMIT ALLOWED${NC}\n"
+    printf "  ${DIM}Scans found things, but you gave the green light.${NC}\n\n"
+else
+    printf "${BOLD}${GREEN}  ALL CLEAR — COMMITTING${NC}\n\n"
+fi
+
+exit 0

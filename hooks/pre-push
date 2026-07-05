@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # hooks/pre-push — your last line of defence before code leaves your machine.
-# Runs before every `git push`.  Exits 0 to allow; non-zero to block.
+# Runs before every `git push`.  Lean and fast — the heavy scans live in pre-commit.
 #
 # Git feeds one line per ref on stdin:
 #   <local ref> <local sha1> <remote ref> <remote sha1>
@@ -9,7 +9,7 @@ set -euo pipefail
 
 # ─── TTY detection ─────────────────────────────────────────────
 INTERACTIVE=false
-[ -t 0 ] && INTERACTIVE=true   # stdin is a terminal → we can ask questions
+[ -t 0 ] && INTERACTIVE=true
 
 # ─── Colors ────────────────────────────────────────────────────
 if [ -t 1 ]; then
@@ -21,20 +21,16 @@ else
 fi
 
 # ─── State ─────────────────────────────────────────────────────
-FOUND_ANYTHING=false      # did any scan find something worth reporting?
-BLOCK_PUSH=false           # set to true when something is a hard blocker
-SCAN_COUNT=0
+BLOCK_PUSH=false
+FOUND_ANYTHING=false
 
 # ─── Helpers ───────────────────────────────────────────────────
-banner()    { printf "\n${BOLD}${MAGENTA}%s${NC}\n" "$*"; }
 section()   { printf "\n${BOLD}${CYAN}━━━ %s ━━━${NC}\n" "$*"; }
 pass()      { printf "  ${GREEN}✓${NC} %s\n" "$*"; }
 fail()      { printf "  ${RED}✗${NC} %s\n" "$*"; }
 warn()      { printf "  ${YELLOW}⚠${NC}  %s\n" "$*"; }
 info()      { printf "  ${DIM}→${NC} %s\n" "$*"; }
 
-# Ask the user a yes/no question.  Returns 0 for yes, 1 for no.
-# Falls back to "yes" when non-interactive (CI: don't block the pipeline).
 ask() {
     local prompt="$1"
     local default="${2:-N}"
@@ -51,127 +47,26 @@ ask() {
     fi
 }
 
-# ─── THE ENTRY ─────────────────────────────────────────────────
+# ─── ENTRY ─────────────────────────────────────────────────────
 entry_show() {
     clear 2>/dev/null || true
     printf "${REV}${BOLD}  ╔══════════════════════════════════════════════════╗  ${NC}\n"
     printf "${REV}${BOLD}  ║${NC}  ${BOLD}WOW WOW WOW!  hold up a second…${NC}              ${REV}${BOLD}║${NC}  \n"
     printf "${REV}${BOLD}  ║${NC}  ${DIM}You're about to push code to the world.${NC}       ${REV}${BOLD}║${NC}  \n"
-    printf "${REV}${BOLD}  ║${NC}  ${BOLD}Let's scan it first.  Better safe than sorry.${NC} ${REV}${BOLD}║${NC}  \n"
+    printf "${REV}${BOLD}  ║${NC}  ${BOLD}Let's do one last sanity check.${NC}            ${REV}${BOLD}║${NC}  \n"
     printf "${REV}${BOLD}  ╚══════════════════════════════════════════════════╝  ${NC}\n"
-    sleep 1.5 2>/dev/null || true
+    sleep 1 2>/dev/null || true
     echo ""
 }
 
-# ─── SCANS ─────────────────────────────────────────────────────
-#
-# Each scan_* function returns 0 if clean, or sets FOUND_ANYTHING=true
-# and optionally BLOCK_PUSH=true when it finds something.  The function
-# itself always returns 0 (the scan itself never aborts — the user
-# decides via prompts).
+# ─── CHECKS ────────────────────────────────────────────────────
 
-scan_secrets() {
-    section "Scanning for secrets  (API keys, tokens, passwords…)"
-
-    local patterns=(
-        # Generic API-key / token shaped
-        '[a-zA-Z0-9_]*[_-]?(api[_-]?key|apikey|API_KEY)\s*[=:]\s*['\''"][a-zA-Z0-9_\-]{12,}['\''"]'
-        '[a-zA-Z0-9_]*[_-]?(secret|SECRET)\s*[=:]\s*['\''"][a-zA-Z0-9_\-]{8,}['\''"]'
-        '[a-zA-Z0-9_]*[_-]?(token|TOKEN|access_token)\s*[=:]\s*['\''"][a-zA-Z0-9_\-.]{12,}['\''"]'
-        '[a-zA-Z0-9_]*[_-]?(password|PASSWORD|passwd)\s*[=:]\s*['\''"][^'\''"]{4,}['\''"]'
-        # Common service patterns
-        'sk-[a-zA-Z0-9]{20,}'                           # OpenAI
-        'ghp_[a-zA-Z0-9]{36}'                            # GitHub PAT
-        'github_pat_[a-zA-Z0-9_]{22,}'                   # GitHub fine-grained
-        'AKIA[0-9A-Z]{16}'                               # AWS access key
-        'xox[baprs]-[0-9a-zA-Z-]{10,}'                   # Slack tokens
-    )
-
-    local hits=0
-    local pattern
-    for pattern in "${patterns[@]}"; do
-        while IFS= read -r line; do
-            [ -z "$line" ] && continue
-            hits=$((hits + 1))
-            if [ "$hits" -eq 1 ]; then
-                warn "Possible secrets found:"
-            fi
-            printf "    ${RED}→${NC} %s\n" "$line"
-        done < <(git diff --cached --unified=0 2>/dev/null | grep -iE "$pattern" || true)
-    done
-
-    if [ "$hits" -gt 0 ]; then
-        FOUND_ANYTHING=true
-        if ask "Secrets detected! Push anyway?"; then
-            warn "Pushing WITH secrets — hope you know what you're doing."
-        else
-            BLOCK_PUSH=true
-        fi
-    else
-        pass "No secrets detected"
-    fi
-}
-
-scan_large_files() {
-    section "Scanning for large files  (≥ 1 MB)"
-
-    local threshold=1048576  # 1 MB
-    local hits=0
-
-    while IFS= read -r line; do
-        [ -z "$line" ] && continue
-        hits=$((hits + 1))
-        if [ "$hits" -eq 1 ]; then
-            warn "Large files in this push:"
-        fi
-        # line format from git diff-tree: :mode mode old_sha new_sha status\tpath
-        local sha path
-        sha=$(echo "$line" | awk '{print $4}')
-        path=$(echo "$line" | cut -f2)
-        local size
-        size=$(git cat-file -s "$sha" 2>/dev/null || echo 0)
-        if [ "$size" -gt "$threshold" ]; then
-            printf "    ${YELLOW}→${NC} %s  ${DIM}(%s)${NC}\n" "$path" "$(numfmt --to=iec "$size" 2>/dev/null || echo "${size} bytes")"
-        fi
-    done < <(git diff --cached --diff-filter=A --raw 2>/dev/null || true)
-
-    if [ "$hits" -gt 0 ]; then
-        FOUND_ANYTHING=true
-        ask "Large files detected. Push anyway?" || BLOCK_PUSH=true
-    else
-        pass "No large files"
-    fi
-}
-
-scan_merge_conflicts() {
-    section "Scanning for merge-conflict markers"
-
-    local hits=0
-    while IFS= read -r line; do
-        [ -z "$line" ] && continue
-        hits=$((hits + 1))
-        if [ "$hits" -eq 1 ]; then
-            fail "Leftover merge-conflict markers:"
-        fi
-        printf "    ${RED}→${NC} %s\n" "$line"
-    done < <(git diff --cached -U0 2>/dev/null | grep -nE '^(\+<<<<<<<|\+=======|\+>>>>>>>)' || true)
-
-    if [ "$hits" -gt 0 ]; then
-        FOUND_ANYTHING=true
-        BLOCK_PUSH=true
-        fail "Merge conflicts must be resolved before pushing."
-    else
-        pass "No merge conflicts"
-    fi
-}
-
-scan_force_push() {
+check_force_push() {
     local local_ref="$1" local_sha="$2" remote_ref="$3" remote_sha="$4"
 
-    # remote_sha is 40 zeros when the remote ref doesn't exist yet (first push).
+    # remote_sha is 40 zeros → first push; nothing to force
     [[ "$remote_sha" =~ ^0{40}$ ]] && { pass "First push to this ref — nothing to force"; return 0; }
 
-    # Check if local is an ancestor of remote (fast-forward) or vice versa.
     if git merge-base --is-ancestor "$remote_sha" "$local_sha" 2>/dev/null; then
         pass "Fast-forward push — all good"
         return 0
@@ -182,131 +77,38 @@ scan_force_push() {
     FOUND_ANYTHING=true
 
     if ask "This will REWRITE history on the remote. Are you ABSOLUTELY sure?"; then
-        warn "Force push confirmed.  You'd better know what you're doing."
+        warn "Force push confirmed.  Hope you know what you're doing."
     else
         BLOCK_PUSH=true
     fi
 }
 
-scan_sensitive_files() {
-    section "Scanning for sensitive files  (.env, keys, certs, credentials…)"
+check_protected_branch() {
+    local remote_ref="$1"
+    local remote_sha="$2"
 
-    local patterns=(
-        '\.env$'            '\.env\.'           'credentials\.json$'
-        '\.pem$'            '\.key$'            '\.pfx$'
-        '\.p12$'            'id_rsa'            'id_ed25519'
-        'id_ecdsa'          'privatekey'        '\.htpasswd$'
-        'secrets\.ya?ml$'   '\.tgz$'            'secrets\.json$'
-    )
-
-    local hits=0
-    local files
-    files=$(git diff --cached --name-only --diff-filter=A 2>/dev/null || true)
-
-    for f in $files; do
-        local name
-        name=$(basename "$f")
-        for pat in "${patterns[@]}"; do
-            if [[ "$name" =~ $pat ]]; then
-                hits=$((hits + 1))
-                [ "$hits" -eq 1 ] && warn "New sensitive-looking files staged:"
-                printf "    ${RED}→${NC} %s\n" "$f"
-                break
+    case "$remote_ref" in
+        refs/heads/main|refs/heads/master)
+            FOUND_ANYTHING=true
+            if [[ ! "$remote_sha" =~ ^0{40}$ ]]; then
+                warn "Pushing directly to ${remote_ref#refs/heads/} — did you mean to open a PR?"
+                ask "Push directly to ${remote_ref#refs/heads/} anyway?" || BLOCK_PUSH=true
+            else
+                pass "First push to ${remote_ref#refs/heads/} — go ahead"
             fi
-        done
-    done
-
-    if [ "$hits" -gt 0 ]; then
-        FOUND_ANYTHING=true
-        if ask "$hits sensitive file(s) detected. Push anyway?"; then
-            warn "Sensitive files will be pushed — double-check they belong."
-        else
-            BLOCK_PUSH=true
-        fi
-    else
-        pass "No sensitive files"
-    fi
+            ;;
+        *)
+            pass "Pushing to ${remote_ref#refs/heads/}"
+            ;;
+    esac
 }
 
-scan_lockfile_sync() {
-    section "Scanning for lockfile drift  (manifest changed, lockfile didn't)"
-
-    local changed
-    changed=$(git diff --cached --name-only 2>/dev/null || true)
-    local hit=false
-
-    # Rust
-    if echo "$changed" | grep -q '^Cargo\.toml$' && ! echo "$changed" | grep -q '^Cargo\.lock$'; then
-        warn "Cargo.toml changed but Cargo.lock was NOT updated"
-        hit=true
-    fi
-
-    # Node
-    if echo "$changed" | grep -q '^package\.json$' && ! echo "$changed" | grep -q '^package-lock\.json$'; then
-        warn "package.json changed but package-lock.json was NOT updated"
-        hit=true
-    fi
-
-    # Python
-    if echo "$changed" | grep -qE '^(pyproject\.toml|setup\.cfg|setup\.py)$' && ! echo "$changed" | grep -qE '(requirements.*\.txt|poetry\.lock|Pipfile\.lock)$'; then
-        warn "Python deps changed but no lockfile update detected"
-        hit=true
-    fi
-
-    # Go
-    if echo "$changed" | grep -q '^go\.mod$' && ! echo "$changed" | grep -q '^go\.sum$'; then
-        warn "go.mod changed but go.sum was NOT updated"
-        hit=true
-    fi
-
-    if $hit; then
-        FOUND_ANYTHING=true
-        ask "Lockfile drift detected. Push anyway?" || BLOCK_PUSH=true
-    else
-        pass "Lockfiles in sync"
-    fi
-}
-
-scan_hardcoded_connections() {
-    section "Scanning for hardcoded connections  (DB URLs, IP addresses…)"
-
-    local patterns=(
-        '(postgres|mysql|mongodb|redis|sqlite)://[^[:space:]]+'
-        '[a-z]+://[^@]+@[^[:space:]]+'       # user:pass@host URLs
-        'jdbc:[^[:space:]]+'
-        '\b([0-9]{1,3}\.){3}[0-9]{1,3}\b'    # IPv4
-    )
-
-    local hits=0
-    local pattern
-    for pattern in "${patterns[@]}"; do
-        while IFS= read -r line; do
-            [ -z "$line" ] && continue
-            hits=$((hits + 1))
-            [ "$hits" -eq 1 ] && warn "Hardcoded connections / IPs:"
-            printf "    ${YELLOW}→${NC} %s\n" "$(echo "$line" | cut -c1-120)"
-        done < <(git diff --cached -U0 2>/dev/null | grep -nE "$pattern" | grep -vE '(localhost|127\.0\.0\.1|0\.0\.0\.0|::1)' || true)
-    done
-
-    if [ "$hits" -gt 0 ]; then
-        FOUND_ANYTHING=true
-        ask "Hardcoded connections detected. Push anyway?" || BLOCK_PUSH=true
-    else
-        pass "No hardcoded connections"
-    fi
-}
-
-scan_unstaged_changes() {
-    section "Scanning for unstaged changes  (modified tracked files not staged)"
-
+check_unstaged_changes() {
     local hits=0
     while IFS= read -r line; do
         [ -z "$line" ] && continue
         hits=$((hits + 1))
-        if [ "$hits" -eq 1 ]; then
-            warn "Tracked files modified but NOT staged:"
-        fi
-        # Parse porcelain v1: XY path (M = modified in worktree, not staged)
+        [ "$hits" -eq 1 ] && warn "Tracked files modified but NOT staged:"
         printf "    ${YELLOW}→${NC} %s\n" "$line"
     done < <(git status --porcelain=v1 2>/dev/null | grep '^.[MDU]' || true)
 
@@ -315,136 +117,18 @@ scan_unstaged_changes() {
         info "Found $hits file(s) with unstaged changes — they WON'T be pushed."
         ask "Push anyway (unstaged changes stay local)?" || BLOCK_PUSH=true
     else
-        pass "Worktree clean — everything is staged"
+        pass "Worktree clean"
     fi
 }
 
-scan_absolute_paths() {
-    section "Scanning for absolute paths  (hardcoded /home/… that break elsewhere)"
-
-    local hits=0
-    while IFS= read -r line; do
-        [ -z "$line" ] && continue
-        hits=$((hits + 1))
-        [ "$hits" -eq 1 ] && warn "Absolute paths in staged changes:"
-        printf "    ${YELLOW}→${NC} %s\n" "$line"
-    done < <(git diff --cached -U0 2>/dev/null | grep -nE '^\+\s*(/home/|/Users/|/tmp/|/var/)' | grep -v '^\+\+\+' || true)
-
-    if [ "$hits" -gt 0 ]; then
-        FOUND_ANYTHING=true
-        ask "Absolute paths detected — won't work on other machines. Push anyway?" || BLOCK_PUSH=true
-    else
-        pass "No absolute paths"
-    fi
-}
-
-scan_todos() {
-    section "Scanning for TODO / FIXME / HACK markers"
-
-    local hits=0
-    while IFS= read -r line; do
-        [ -z "$line" ] && continue
-        hits=$((hits + 1))
-        if [ "$hits" -eq 1 ]; then
-            info "You left these behind:"
-        fi
-        printf "    ${DIM}→${NC} %s\n" "$line"
-    done < <(git diff --cached -U0 2>/dev/null | grep -nE '^\+\s*(TODO|FIXME|HACK|XXX|TEMP|WORKAROUND)' || true)
-
-    if [ "$hits" -gt 0 ]; then
-        FOUND_ANYTHING=true
-        ask "Found $hits TODO/FIXME markers. Push anyway?" || BLOCK_PUSH=true
-    else
-        pass "No forgotten markers"
-    fi
-}
-
-scan_debug_prints() {
-    section "Scanning for debug prints  (console.log, println!, dbg!, print())"
-
-    local hits=0
-    while IFS= read -r line; do
-        [ -z "$line" ] && continue
-        hits=$((hits + 1))
-        if [ "$hits" -eq 1 ]; then
-            warn "Debug output in staged changes:"
-        fi
-        printf "    ${YELLOW}→${NC} %s\n" "$line"
-    done < <(git diff --cached -U0 2>/dev/null | grep -nE '^\+\s*(console\.(log|debug|warn)|println!|dbg!|print\(|printf\(|echo|var_dump|dump\()' || true)
-
-    if [ "$hits" -gt 0 ]; then
-        FOUND_ANYTHING=true
-        ask "Debug prints detected. Push anyway?" || BLOCK_PUSH=true
-    else
-        pass "No debug prints"
-    fi
-}
-
-scan_trailing_whitespace() {
-    section "Scanning for trailing whitespace"
-
-    local hits=0
-    while IFS= read -r line; do
-        [ -z "$line" ] && continue
-        hits=$((hits + 1))
-        if [ "$hits" -eq 1 ]; then
-            warn "Trailing whitespace:"
-        fi
-        printf "    ${DIM}→${NC} %s\n" "$line"
-    done < <(git diff --cached -U0 2>/dev/null | grep -nE '^\+\s+$' || true)
-
-    if [ "$hits" -gt 0 ]; then
-        FOUND_ANYTHING=true
-        if ask "Trailing whitespace found. Strip it now?"; then
-            # Only strip lines that are newly added (+)
-            local files
-            files=$(git diff --cached --name-only 2>/dev/null)
-            for f in $files; do
-                [ ! -f "$f" ] && continue
-                sed -i 's/[[:space:]]*$//' "$f" 2>/dev/null || true
-            done
-            git add $files 2>/dev/null || true
-            pass "Trailing whitespace stripped"
-        fi
-    else
-        pass "No trailing whitespace"
-    fi
-}
-
-scan_untracked_important() {
-    section "Scanning for untracked files you might want to commit"
-
-    local hits=0
-    while IFS= read -r line; do
-        [ -z "$line" ] && continue
-        hits=$((hits + 1))
-        if [ "$hits" -eq 1 ]; then
-            info "Untracked files that look important:"
-        fi
-        printf "    ${DIM}→${NC} %s\n" "$line"
-    done < <(git ls-files --others --exclude-standard | grep -ivE '(\.lock|\.tmp|\.swp|node_modules/|target/|__pycache__/)' | head -20 || true)
-
-    if [ "$hits" -gt 0 ]; then
-        FOUND_ANYTHING=true
-        info "Found $hits untracked file(s) — maybe add them before pushing?"
-        ask "Push anyway?" || BLOCK_PUSH=true
-    else
-        pass "Nothing important untracked"
-    fi
-}
-
-scan_commit_message() {
-    section "Checking commit message quality"
-
+check_commit_messages() {
     local range
-    # Find what's about to be pushed
     range=$(git rev-parse --abbrev-ref HEAD 2>/dev/null || echo "HEAD")
 
     local hits=0
     while IFS= read -r msg; do
         [ -z "$msg" ] && continue
         local len=${#msg}
-
         if [ "$len" -lt 8 ]; then
             hits=$((hits + 1))
             [ "$hits" -eq 1 ] && warn "Short commit messages (under 8 chars):"
@@ -460,12 +144,29 @@ scan_commit_message() {
     fi
 }
 
-# ─── Main sausage ──────────────────────────────────────────────
+check_untracked() {
+    local hits=0
+    while IFS= read -r line; do
+        [ -z "$line" ] && continue
+        hits=$((hits + 1))
+        [ "$hits" -eq 1 ] && info "Untracked files that look important:"
+        printf "    ${DIM}→${NC} %s\n" "$line"
+    done < <(git ls-files --others --exclude-standard | grep -ivE '(\.lock|\.tmp|\.swp|node_modules/|target/|__pycache__/)' | head -20 || true)
+
+    if [ "$hits" -gt 0 ]; then
+        FOUND_ANYTHING=true
+        info "Found $hits untracked file(s) — maybe add them before pushing?"
+        ask "Push anyway?" || BLOCK_PUSH=true
+    else
+        pass "Nothing important untracked"
+    fi
+}
+
+# ─── MAIN ──────────────────────────────────────────────────────
 
 entry_show
 
 FAILED=0
-SCANNED=0
 
 while read -r local_ref local_sha remote_ref remote_sha; do
     printf "  ${BOLD}Pushing${NC}  %s ${CYAN}→${NC} %s\n" \
@@ -473,22 +174,11 @@ while read -r local_ref local_sha remote_ref remote_sha; do
         "${remote_ref#refs/heads/}"
     echo ""
 
-    # ── Run every scan ──────────────────────────────────────
-    scan_force_push          "$local_ref" "$local_sha" "$remote_ref" "$remote_sha"
-    scan_secrets
-    scan_sensitive_files
-    scan_large_files
-    scan_merge_conflicts
-    scan_lockfile_sync
-    scan_hardcoded_connections
-    scan_absolute_paths
-    scan_unstaged_changes
-    scan_todos
-    scan_debug_prints
-    scan_trailing_whitespace
-    scan_untracked_important
-    scan_commit_message
-    SCANNED=$((SCANNED + 1))
+    check_force_push        "$local_ref" "$local_sha" "$remote_ref" "$remote_sha"
+    check_protected_branch  "$remote_ref" "$remote_sha"
+    check_unstaged_changes
+    check_commit_messages
+    check_untracked
 
     if $BLOCK_PUSH; then
         FAILED=1
@@ -499,25 +189,18 @@ done
 
 echo ""
 if [ "$FAILED" -ne 0 ]; then
-    printf "${BOLD}${REV}  PUSH BLOCKED  ${NC}\n"
-    echo ""
-    printf "  ${RED}Some checks didn't pass and you chose not to proceed.${NC}\n"
-    printf "  ${DIM}Fix the issues above and try again.${NC}\n"
-    echo ""
+    printf "${BOLD}${REV}  PUSH BLOCKED  ${NC}\n\n"
+    printf "  ${RED}Fix the issues above and try again.${NC}\n\n"
     exit 1
 fi
 
 if $FOUND_ANYTHING; then
-    printf "${BOLD}${GREEN}  PUSH ALLOWED  ${NC}\n"
-    echo ""
-    printf "  ${GREEN}Scans found things, but you gave the green light.${NC}\n"
-    printf "  ${DIM}You're the boss.  Godspeed.${NC}\n"
+    printf "${BOLD}${GREEN}  PUSH ALLOWED  ${NC}\n\n"
+    printf "  ${GREEN}Checks found things, but you gave the green light.${NC}\n"
+    printf "  ${DIM}Godspeed.${NC}\n\n"
 else
-    printf "${BOLD}${GREEN}  ALL CLEAR — PUSHING  ${NC}\n"
-    echo ""
-    printf "  ${GREEN}Everything looks clean.${NC}\n"
-    printf "  ${DIM}Carry on.${NC}\n"
+    printf "${BOLD}${GREEN}  ALL CLEAR — PUSHING  ${NC}\n\n"
+    printf "  ${DIM}Carry on.${NC}\n\n"
 fi
 
-echo ""
 exit 0
