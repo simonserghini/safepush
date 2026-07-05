@@ -67,11 +67,4 @@ In CI or scripts (non-TTY), all checks pass through without blocking.
 
 Debug-prints check covers: JavaScript/TS, Rust, Python, Go, Java, C#, Ruby, Kotlin, PHP, C/C++, Bash.
 
-## Rust CLI (optional)
 
-A Rust binary with three-tier severity (Block/Warn/Info), inline-ignore comments, and auto-fix is included under `src/`.  Requires Rust toolchain.
-
-```bash
-cargo build --release
-./target/release/gitcheckpush pre-commit
-```
