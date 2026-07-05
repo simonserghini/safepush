@@ -165,6 +165,179 @@ scan_merge_conflicts() {
     fi
 }
 
+scan_force_push() {
+    local local_ref="$1" local_sha="$2" remote_ref="$3" remote_sha="$4"
+
+    # remote_sha is 40 zeros when the remote ref doesn't exist yet (first push).
+    [[ "$remote_sha" =~ ^0{40}$ ]] && { pass "First push to this ref — nothing to force"; return 0; }
+
+    # Check if local is an ancestor of remote (fast-forward) or vice versa.
+    if git merge-base --is-ancestor "$remote_sha" "$local_sha" 2>/dev/null; then
+        pass "Fast-forward push — all good"
+        return 0
+    fi
+
+    fail "Force push detected!  (${remote_ref#refs/heads/} will lose commits)"
+    warn "Local ${local_sha:0:7} is NOT a descendant of remote ${remote_sha:0:7}"
+    FOUND_ANYTHING=true
+
+    if ask "This will REWRITE history on the remote. Are you ABSOLUTELY sure?"; then
+        warn "Force push confirmed.  You'd better know what you're doing."
+    else
+        BLOCK_PUSH=true
+    fi
+}
+
+scan_sensitive_files() {
+    section "Scanning for sensitive files  (.env, keys, certs, credentials…)"
+
+    local patterns=(
+        '\.env$'            '\.env\.'           'credentials\.json$'
+        '\.pem$'            '\.key$'            '\.pfx$'
+        '\.p12$'            'id_rsa'            'id_ed25519'
+        'id_ecdsa'          'privatekey'        '\.htpasswd$'
+        'secrets\.ya?ml$'   '\.tgz$'            'secrets\.json$'
+    )
+
+    local hits=0
+    local files
+    files=$(git diff --cached --name-only --diff-filter=A 2>/dev/null || true)
+
+    for f in $files; do
+        local name
+        name=$(basename "$f")
+        for pat in "${patterns[@]}"; do
+            if [[ "$name" =~ $pat ]]; then
+                hits=$((hits + 1))
+                [ "$hits" -eq 1 ] && warn "New sensitive-looking files staged:"
+                printf "    ${RED}→${NC} %s\n" "$f"
+                break
+            fi
+        done
+    done
+
+    if [ "$hits" -gt 0 ]; then
+        FOUND_ANYTHING=true
+        if ask "$hits sensitive file(s) detected. Push anyway?"; then
+            warn "Sensitive files will be pushed — double-check they belong."
+        else
+            BLOCK_PUSH=true
+        fi
+    else
+        pass "No sensitive files"
+    fi
+}
+
+scan_lockfile_sync() {
+    section "Scanning for lockfile drift  (manifest changed, lockfile didn't)"
+
+    local changed
+    changed=$(git diff --cached --name-only 2>/dev/null || true)
+    local hit=false
+
+    # Rust
+    if echo "$changed" | grep -q '^Cargo\.toml$' && ! echo "$changed" | grep -q '^Cargo\.lock$'; then
+        warn "Cargo.toml changed but Cargo.lock was NOT updated"
+        hit=true
+    fi
+
+    # Node
+    if echo "$changed" | grep -q '^package\.json$' && ! echo "$changed" | grep -q '^package-lock\.json$'; then
+        warn "package.json changed but package-lock.json was NOT updated"
+        hit=true
+    fi
+
+    # Python
+    if echo "$changed" | grep -qE '^(pyproject\.toml|setup\.cfg|setup\.py)$' && ! echo "$changed" | grep -qE '(requirements.*\.txt|poetry\.lock|Pipfile\.lock)$'; then
+        warn "Python deps changed but no lockfile update detected"
+        hit=true
+    fi
+
+    # Go
+    if echo "$changed" | grep -q '^go\.mod$' && ! echo "$changed" | grep -q '^go\.sum$'; then
+        warn "go.mod changed but go.sum was NOT updated"
+        hit=true
+    fi
+
+    if $hit; then
+        FOUND_ANYTHING=true
+        ask "Lockfile drift detected. Push anyway?" || BLOCK_PUSH=true
+    else
+        pass "Lockfiles in sync"
+    fi
+}
+
+scan_hardcoded_connections() {
+    section "Scanning for hardcoded connections  (DB URLs, IP addresses…)"
+
+    local patterns=(
+        '(postgres|mysql|mongodb|redis|sqlite)://[^[:space:]]+'
+        '[a-z]+://[^@]+@[^[:space:]]+'       # user:pass@host URLs
+        'jdbc:[^[:space:]]+'
+        '\b([0-9]{1,3}\.){3}[0-9]{1,3}\b'    # IPv4
+    )
+
+    local hits=0
+    local pattern
+    for pattern in "${patterns[@]}"; do
+        while IFS= read -r line; do
+            [ -z "$line" ] && continue
+            hits=$((hits + 1))
+            [ "$hits" -eq 1 ] && warn "Hardcoded connections / IPs:"
+            printf "    ${YELLOW}→${NC} %s\n" "$(echo "$line" | cut -c1-120)"
+        done < <(git diff --cached -U0 2>/dev/null | grep -nE "$pattern" | grep -vE '(localhost|127\.0\.0\.1|0\.0\.0\.0|::1)' || true)
+    done
+
+    if [ "$hits" -gt 0 ]; then
+        FOUND_ANYTHING=true
+        ask "Hardcoded connections detected. Push anyway?" || BLOCK_PUSH=true
+    else
+        pass "No hardcoded connections"
+    fi
+}
+
+scan_unstaged_changes() {
+    section "Scanning for unstaged changes  (modified tracked files not staged)"
+
+    local hits=0
+    while IFS= read -r line; do
+        [ -z "$line" ] && continue
+        hits=$((hits + 1))
+        if [ "$hits" -eq 1 ]; then
+            warn "Tracked files modified but NOT staged:"
+        fi
+        # Parse porcelain v1: XY path (M = modified in worktree, not staged)
+        printf "    ${YELLOW}→${NC} %s\n" "$line"
+    done < <(git status --porcelain=v1 2>/dev/null | grep '^.[MDU]' || true)
+
+    if [ "$hits" -gt 0 ]; then
+        FOUND_ANYTHING=true
+        info "Found $hits file(s) with unstaged changes — they WON'T be pushed."
+        ask "Push anyway (unstaged changes stay local)?" || BLOCK_PUSH=true
+    else
+        pass "Worktree clean — everything is staged"
+    fi
+}
+
+scan_absolute_paths() {
+    section "Scanning for absolute paths  (hardcoded /home/… that break elsewhere)"
+
+    local hits=0
+    while IFS= read -r line; do
+        [ -z "$line" ] && continue
+        hits=$((hits + 1))
+        [ "$hits" -eq 1 ] && warn "Absolute paths in staged changes:"
+        printf "    ${YELLOW}→${NC} %s\n" "$line"
+    done < <(git diff --cached -U0 2>/dev/null | grep -nE '^\+\s*(/home/|/Users/|/tmp/|/var/)' | grep -v '^\+\+\+' || true)
+
+    if [ "$hits" -gt 0 ]; then
+        FOUND_ANYTHING=true
+        ask "Absolute paths detected — won't work on other machines. Push anyway?" || BLOCK_PUSH=true
+    else
+        pass "No absolute paths"
+    fi
+}
+
 scan_todos() {
     section "Scanning for TODO / FIXME / HACK markers"
 
@@ -301,9 +474,15 @@ while read -r local_ref local_sha remote_ref remote_sha; do
     echo ""
 
     # ── Run every scan ──────────────────────────────────────
+    scan_force_push          "$local_ref" "$local_sha" "$remote_ref" "$remote_sha"
     scan_secrets
+    scan_sensitive_files
     scan_large_files
     scan_merge_conflicts
+    scan_lockfile_sync
+    scan_hardcoded_connections
+    scan_absolute_paths
+    scan_unstaged_changes
     scan_todos
     scan_debug_prints
     scan_trailing_whitespace
