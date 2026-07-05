@@ -12,6 +12,27 @@
 # └─────────────────────────────────────────────────────────────┘
 set -euo pipefail
 
+# ── Platform detection — macOS needs slightly different flags ─
+if sed --version 2>/dev/null | grep -q GNU; then
+    SED_INPLACE="sed -i"          # GNU sed (Linux)
+else
+    SED_INPLACE="sed -i ''"       # BSD sed (macOS)
+fi
+
+# Pure-bash human-readable file size (no numfmt dependency)
+human_size() {
+    local bytes=$1
+    if [ "$bytes" -lt 1024 ]; then
+        echo "${bytes}B"
+    elif [ "$bytes" -lt 1048576 ]; then
+        echo "$((bytes / 1024))KB"
+    elif [ "$bytes" -lt 1073741824 ]; then
+        printf "%.1fMB" "$(echo "scale=1; $bytes / 1048576" | bc 2>/dev/null || echo $((bytes / 1048576)))"
+    else
+        printf "%.1fGB" "$(echo "scale=1; $bytes / 1073741824" | bc 2>/dev/null || echo $((bytes / 1073741824)))"
+    fi
+}
+
 # ── Are you a human at a keyboard, or is this a bot in CI? ───
 # We need to know because bots don't answer questions.
 INTERACTIVE=false
@@ -200,7 +221,7 @@ scan_large_files() {
         if [ "$size" -gt "$threshold" ]; then
             hits=$((hits + 1))
             [ "$hits" -eq 1 ] && warn "Large files staged:"
-            printf "    ${YELLOW}→${NC} %s  ${DIM}(%s)${NC}\n" "$path" "$(numfmt --to=iec "$size" 2>/dev/null || echo "${size}B")"
+            printf "    ${YELLOW}→${NC} %s  ${DIM}(%s)${NC}\n" "$path" "$(human_size "$size")"
         fi
     done < <(git diff --cached --diff-filter=A --raw 2>/dev/null || true)
 
@@ -293,7 +314,7 @@ scan_trailing_whitespace() {
             local files=$(git diff --cached --name-only 2>/dev/null)
             for f in $files; do
                 [ ! -f "$f" ] && continue
-                sed -i 's/[[:space:]]*$//' "$f" 2>/dev/null || true
+                $SED_INPLACE 's/[[:space:]]*$//' "$f" 2>/dev/null || true
             done
             git add $files 2>/dev/null || true
             pass "Whitespace stripped"
