@@ -1,9 +1,9 @@
 #!/usr/bin/env bash
-# install.sh — one-liner installer for gitcheckpush.
+# install.sh — one-liner installer for safepush.
 #
 # Usage:
 #   cd /path/to/your/project
-#   curl -sSL https://raw.githubusercontent.com/simon/gitcheckpush/main/install.sh | bash
+#   curl -sSL https://raw.githubusercontent.com/simon/safepush/master/install.sh | bash
 #
 # Or if you've cloned the repo:
 #   ./install.sh
@@ -15,7 +15,7 @@ set -euo pipefail
 # ── Config ─────────────────────────────────────────────────────
 # Change this to your fork if you host your own copy.
 GITHUB_USER="${GITHUB_USER:-simon}"
-GITHUB_REPO="${GITHUB_REPO:-gitcheckpush}"
+GITHUB_REPO="${GITHUB_REPO:-safepush}"
 GITHUB_BRANCH="${GITHUB_BRANCH:-master}"
 BASE_URL="https://raw.githubusercontent.com/${GITHUB_USER}/${GITHUB_REPO}/${GITHUB_BRANCH}"
 
@@ -28,11 +28,11 @@ GIT_DIR=$(git rev-parse --git-dir 2>/dev/null) || {
 
 HOOKS_DIR="${GIT_DIR}/hooks"
 
-# ── Detect if we're inside a cloned gitcheckpush repo ──────────
+# ── Detect if we're inside a cloned safepush repo ──────────
 REPO_ROOT=$(git rev-parse --show-toplevel 2>/dev/null)
 LOCAL=false
 if [ -f "$REPO_ROOT/hooks/pre-commit" ] && [ -f "$REPO_ROOT/hooks/pre-push" ]; then
-    # Check if it looks like gitcheckpush
+    # Check if it looks like safepush
     if grep -q 'hooks/pre-commit' "$REPO_ROOT/hooks/pre-commit" 2>/dev/null; then
         LOCAL=true
     fi
@@ -67,16 +67,16 @@ install_hook() {
 }
 
 echo ""
-echo "  gitcheckpush — installing hooks…"
+echo "  🔐 safepush — installing hooks…"
 echo ""
 
 install_hook "pre-commit"
 install_hook "pre-push"
 
 # ── Create example blocklist if none exists ────────────────────
-if [ ! -f "$REPO_ROOT/.gitcheckpush-blocklist" ]; then
-    if curl -sSLf "$BASE_URL/.gitcheckpush-blocklist" -o "$REPO_ROOT/.gitcheckpush-blocklist" 2>/dev/null; then
-        echo "  ✓ .gitcheckpush-blocklist (example — edit with your patterns)"
+if [ ! -f "$REPO_ROOT/.safepush-blocklist" ]; then
+    if curl -sSLf "$BASE_URL/.safepush-blocklist" -o "$REPO_ROOT/.safepush-blocklist" 2>/dev/null; then
+        echo "  ✓ .safepush-blocklist (example — edit with your patterns)"
     fi
 fi
 
@@ -84,6 +84,6 @@ fi
 echo ""
 echo "  Done — $installed hook(s) installed."
 echo ""
-echo "  Next: edit .gitcheckpush-blocklist with your personal patterns"
+echo "  Next: edit .safepush-blocklist with your personal patterns"
 echo "        (emails, phone numbers, project names you never want to leak)"
 echo ""

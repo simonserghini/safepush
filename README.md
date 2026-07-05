@@ -1,13 +1,21 @@
-# gitcheckpush
+# 🔐 safepush
 
-Git hooks that scan your code before it leaves your machine.  
-**Better safe than sorry.**
+```
+  ███████  █████  ███████ ███████ ██████  ██    ██ ███████ ██   ██
+  ██      ██   ██ ██      ██      ██   ██ ██    ██ ██      ██   ██
+  ███████ ███████ █████   █████   ██████  ██    ██ ███████ ███████
+       ██ ██   ██ ██      ██      ██      ██    ██      ██ ██   ██
+  ███████ ██   ██ ██      ███████ ██       ██████  ███████ ██   ██
+```
+
+**Git hooks that scan your code before it leaves your machine.**  
+Better safe than sorry.
 
 ## Quick start
 
 ```bash
 cd /path/to/your/project
-curl -sSL https://raw.githubusercontent.com/simon/gitcheckpush/master/install.sh | bash
+curl -sSL https://raw.githubusercontent.com/simon/safepush/master/install.sh | bash
 ```
 
 That's it. Now every `git commit` and `git push` in that repo will run through the checks.
@@ -20,10 +28,11 @@ Or if you've cloned this repo:
 
 ## What it checks
 
-### pre-commit (10 checks)
+### pre-commit (11 checks)
 
 | Check | Severity | What it flags |
 |-------|----------|---------------|
+| Custom blocklist | BLOCK | Your personal patterns (emails, phones, secrets) |
 | Secrets | BLOCK | API keys, tokens, passwords, AWS keys, GitHub PATs |
 | Sensitive files | BLOCK | `.env`, `.pem`, `.key`, `id_rsa`, credentials |
 | Large files | WARN | Files ≥ 1 MB |
@@ -47,10 +56,10 @@ Or if you've cloned this repo:
 
 ## Custom blocklist
 
-Create a `.gitcheckpush-blocklist` file in your repo root with one pattern per line:
+Create a `.safepush-blocklist` file in your repo root with one pattern per line:
 
 ```
-# .gitcheckpush-blocklist — these patterns will BLOCK the commit
+# .safepush-blocklist — these patterns will BLOCK the commit
 simon@example.com
 \+1-555-\d{3}-\d{4}
 internal\.company\.com
@@ -66,5 +75,3 @@ In CI or scripts (non-TTY), all checks pass through without blocking.
 ## Language support
 
 Debug-prints check covers: JavaScript/TS, Rust, Python, Go, Java, C#, Ruby, Kotlin, PHP, C/C++, Bash.
-
-

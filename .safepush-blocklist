@@ -1,4 +1,4 @@
-# .gitcheckpush-blocklist — patterns the pre-commit hook will BLOCK on push.
+# .safepush-blocklist — patterns the pre-commit hook will BLOCK on push.
 # One pattern per line.  Supports basic grep -E regex.
 # Lines starting with # are comments.
 #

@@ -273,13 +273,13 @@ scan_absolute_paths() {
 }
 
 scan_blocklist() {
-    section "Custom blocklist  (.gitcheckpush-blocklist)"
+    section "Custom blocklist  (.safepush-blocklist)"
 
     local blocklist_file
-    blocklist_file=$(git rev-parse --show-toplevel 2>/dev/null)/.gitcheckpush-blocklist
+    blocklist_file=$(git rev-parse --show-toplevel 2>/dev/null)/.safepush-blocklist
 
     if [ ! -f "$blocklist_file" ]; then
-        pass "No blocklist file found  (create .gitcheckpush-blocklist to enable)"
+        pass "No blocklist file found  (create .safepush-blocklist to enable)"
         return 0
     fi
 
