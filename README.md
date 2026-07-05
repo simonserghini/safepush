@@ -6,12 +6,17 @@ Git hooks that scan your code before it leaves your machine.
 ## Quick start
 
 ```bash
-git clone <this-repo>
-cd gitcheckpush
-./install-hooks.sh
+cd /path/to/your/project
+curl -sSL https://raw.githubusercontent.com/simon/gitcheckpush/main/install.sh | bash
 ```
 
-That's it. Now every `git commit` and `git push` in this repo will run through the checks.
+That's it. Now every `git commit` and `git push` in that repo will run through the checks.
+
+Or if you've cloned this repo:
+
+```bash
+./install.sh      # symlinks hooks from the cloned copy
+```
 
 ## What it checks
 
