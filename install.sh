@@ -16,7 +16,7 @@ set -euo pipefail
 # Change this to your fork if you host your own copy.
 GITHUB_USER="${GITHUB_USER:-simon}"
 GITHUB_REPO="${GITHUB_REPO:-gitcheckpush}"
-GITHUB_BRANCH="${GITHUB_BRANCH:-main}"
+GITHUB_BRANCH="${GITHUB_BRANCH:-master}"
 BASE_URL="https://raw.githubusercontent.com/${GITHUB_USER}/${GITHUB_REPO}/${GITHUB_BRANCH}"
 
 # ── Check we're in a git repo ──────────────────────────────────

@@ -7,7 +7,7 @@ Git hooks that scan your code before it leaves your machine.
 
 ```bash
 cd /path/to/your/project
-curl -sSL https://raw.githubusercontent.com/simon/gitcheckpush/main/install.sh | bash
+curl -sSL https://raw.githubusercontent.com/simon/gitcheckpush/master/install.sh | bash
 ```
 
 That's it. Now every `git commit` and `git push` in that repo will run through the checks.
