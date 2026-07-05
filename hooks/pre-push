@@ -1,17 +1,24 @@
 #!/usr/bin/env bash
-# hooks/pre-push — your last line of defence before code leaves your machine.
-# Runs before every `git push`.  Lean and fast — the heavy scans live in pre-commit.
-#
-# Git feeds one line per ref on stdin:
-#   <local ref> <local sha1> <remote ref> <remote sha1>
-
+# ┌─────────────────────────────────────────────────────────────┐
+# │  safepush — pre-push hook                                  │
+# │                                                             │
+# │  Runs right before `git push` sends your code to the       │
+# │  remote.  This is your last chance to ask: "wait, should   │
+# │  I really be doing this?"                                  │
+# │                                                             │
+# │  We don't do heavy scanning here — that already happened    │
+# │  during pre-commit.  These are the push-specific checks.    │
+# │                                                             │
+# │  Git gives us info about what's being pushed on stdin:      │
+# │    <local ref> <local sha> <remote ref> <remote sha>        │
+# └─────────────────────────────────────────────────────────────┘
 set -euo pipefail
 
-# ─── TTY detection ─────────────────────────────────────────────
+# ── Real human or CI bot? ────────────────────────────────────
 INTERACTIVE=false
 [ -t 0 ] && INTERACTIVE=true
 
-# ─── Colors ────────────────────────────────────────────────────
+# ── Terminal colors ──────────────────────────────────────────
 if [ -t 1 ]; then
     RED='\033[0;31m'      GREEN='\033[0;32m'    YELLOW='\033[1;33m'
     CYAN='\033[0;36m'     MAGENTA='\033[0;35m'  BOLD='\033[1m'
@@ -20,11 +27,11 @@ else
     RED='' GREEN='' YELLOW='' CYAN='' MAGENTA='' BOLD='' DIM='' NC='' REV=''
 fi
 
-# ─── State ─────────────────────────────────────────────────────
+# ── State ────────────────────────────────────────────────────
 BLOCK_PUSH=false
 FOUND_ANYTHING=false
 
-# ─── Helpers ───────────────────────────────────────────────────
+# ── Helpers ──────────────────────────────────────────────────
 section()   { printf "\n${BOLD}${CYAN}━━━ %s ━━━${NC}\n" "$*"; }
 pass()      { printf "  ${GREEN}✓${NC} %s\n" "$*"; }
 fail()      { printf "  ${RED}✗${NC} %s\n" "$*"; }
@@ -47,7 +54,7 @@ ask() {
     fi
 }
 
-# ─── ENTRY ─────────────────────────────────────────────────────
+# ── The big entrance — you can't miss this ────────────────────
 entry_show() {
     clear 2>/dev/null || true
     printf "${REV}${BOLD}  ╔══════════════════════════════════════════════════╗  ${NC}\n"
@@ -59,19 +66,32 @@ entry_show() {
     echo ""
 }
 
-# ─── CHECKS ────────────────────────────────────────────────────
+# ═══════════════════════════════════════════════════════════════
+#  THE CHECKS
+#  These are push-specific — things that only matter when your
+#  code is about to leave your machine.
+# ═══════════════════════════════════════════════════════════════
 
+# ── Force push — the nuclear option ───────────────────────────
+# Git tells us the remote SHA.  If your local branch is NOT a
+# descendant of the remote, that means you're rewriting history.
+# This can delete other people's work.  We ask very firmly.
+#
+# If the remote SHA is all zeros, this is a first push — no
+# history to rewrite, so we let it through.
 check_force_push() {
     local local_ref="$1" local_sha="$2" remote_ref="$3" remote_sha="$4"
 
-    # remote_sha is 40 zeros → first push; nothing to force
+    # First push to this branch?  Nothing to force.
     [[ "$remote_sha" =~ ^0{40}$ ]] && { pass "First push to this ref — nothing to force"; return 0; }
 
+    # Is local a descendant of remote?  That's a normal fast-forward push.
     if git merge-base --is-ancestor "$remote_sha" "$local_sha" 2>/dev/null; then
         pass "Fast-forward push — all good"
         return 0
     fi
 
+    # Uh oh.  Your branch and the remote have diverged.
     fail "Force push detected!  (${remote_ref#refs/heads/} will lose commits)"
     warn "Local ${local_sha:0:7} is NOT a descendant of remote ${remote_sha:0:7}"
     FOUND_ANYTHING=true
@@ -83,6 +103,10 @@ check_force_push() {
     fi
 }
 
+# ── Protected branch — "are you pushing straight to main?" ────
+# Pushing directly to main/master skips code review.
+# We warn you, because you probably meant to open a PR instead.
+# First push to a protected branch is fine — you're creating it.
 check_protected_branch() {
     local remote_ref="$1"
     local remote_sha="$2"
@@ -103,6 +127,10 @@ check_protected_branch() {
     esac
 }
 
+# ── Unstaged changes — "you forgot to git add these" ──────────
+# If you've modified tracked files but haven't staged them,
+# they WON'T be included in the push.  Maybe that's intentional,
+# maybe it's a mistake.  We point it out so you can decide.
 check_unstaged_changes() {
     local hits=0
     while IFS= read -r line; do
@@ -121,11 +149,16 @@ check_unstaged_changes() {
     fi
 }
 
+# ── Commit messages — "is that really the best you've got?" ───
+# We check every commit that's about to be pushed (not just the
+# latest one).  Messages under 8 characters are flagged.
+# "fix", "wip", "oops" — come on, you can do better than that.
 check_commit_messages() {
     local range
     range=$(git rev-parse --abbrev-ref HEAD 2>/dev/null || echo "HEAD")
 
     local hits=0
+    # Walk from HEAD back to origin/HEAD — every pending commit
     while IFS= read -r msg; do
         [ -z "$msg" ] && continue
         local len=${#msg}
@@ -144,6 +177,10 @@ check_commit_messages() {
     fi
 }
 
+# ── Untracked files — "did you forget to add these?" ──────────
+# Files that exist in your working directory but aren't tracked
+# by git.  Maybe they're build artifacts, maybe they're important
+# new files you forgot to `git add`.  We show the top 20.
 check_untracked() {
     local hits=0
     while IFS= read -r line; do
@@ -162,12 +199,15 @@ check_untracked() {
     fi
 }
 
-# ─── MAIN ──────────────────────────────────────────────────────
+# ═══════════════════════════════════════════════════════════════
+#  MAIN — read what git tells us, run the checks, give a verdict
+# ═══════════════════════════════════════════════════════════════
 
 entry_show
 
 FAILED=0
 
+# Git sends us one line per ref being pushed.  Usually just one.
 while read -r local_ref local_sha remote_ref remote_sha; do
     printf "  ${BOLD}Pushing${NC}  %s ${CYAN}→${NC} %s\n" \
         "$local_ref" \
@@ -185,8 +225,7 @@ while read -r local_ref local_sha remote_ref remote_sha; do
     fi
 done
 
-# ─── VERDICT ───────────────────────────────────────────────────
-
+# ── The final word ────────────────────────────────────────────
 echo ""
 if [ "$FAILED" -ne 0 ]; then
     printf "${BOLD}${REV}  PUSH BLOCKED  ${NC}\n\n"

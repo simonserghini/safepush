@@ -1,35 +1,47 @@
 #!/usr/bin/env bash
-# hooks/pre-commit — runs before every `git commit`.
-# Fast checks on what you're about to commit.  Exits 0 to allow; non-zero to block.
-#
-# This is your first line of defence — catches stuff before it even gets staged.
-
+# ┌─────────────────────────────────────────────────────────────┐
+# │  safepush — pre-commit hook                                │
+# │                                                             │
+# │  Runs every time you type `git commit`.  We look at what   │
+# │  you're about to commit and ask: "are you sure about that?" │
+# │                                                             │
+# │  If everything looks good → the commit goes through.        │
+# │  If we find something sketchy → we ask you about it first.  │
+# │                                                             │
+# │  No judgment.  Just a friend looking over your shoulder.    │
+# └─────────────────────────────────────────────────────────────┘
 set -euo pipefail
 
-# ─── TTY detection ─────────────────────────────────────────────
+# ── Are you a human at a keyboard, or is this a bot in CI? ───
+# We need to know because bots don't answer questions.
 INTERACTIVE=false
-[ -t 0 ] && INTERACTIVE=true
+[ -t 0 ] && INTERACTIVE=true    # stdin is a terminal → real person
 
-# ─── Colors ────────────────────────────────────────────────────
+# ── Terminal colors (skip if output is piped to a file) ──────
+# We want things to look pretty, but not if you're redirecting to a log.
 if [ -t 1 ]; then
     RED='\033[0;31m'      GREEN='\033[0;32m'    YELLOW='\033[1;33m'
     CYAN='\033[0;36m'     BOLD='\033[1m'        DIM='\033[2m'
-    NC='\033[0m'
+    NC='\033[0m'           # "no color" — resets back to normal
 else
     RED='' GREEN='' YELLOW='' CYAN='' BOLD='' DIM='' NC=''
 fi
 
-# ─── State ─────────────────────────────────────────────────────
-BLOCK_COMMIT=false
-FOUND_ANYTHING=false
+# ── Our memory — did we find anything?  Should we block? ─────
+BLOCK_COMMIT=false         # set to true if something is a hard no
+FOUND_ANYTHING=false       # set to true if anything at all came up
 
-# ─── Helpers ───────────────────────────────────────────────────
+# ── Tiny helpers that keep the output consistent ─────────────
+# Each one prints with the right emoji and color.
 section()   { printf "\n${BOLD}${CYAN}━━━ %s ━━━${NC}\n" "$*"; }
 pass()      { printf "  ${GREEN}✓${NC} %s\n" "$*"; }
 fail()      { printf "  ${RED}✗${NC} %s\n" "$*"; }
 warn()      { printf "  ${YELLOW}⚠${NC}  %s\n" "$*"; }
 info()      { printf "  ${DIM}→${NC} %s\n" "$*"; }
 
+# ask — the heart of the interactive experience.
+# Shows you a question and waits for y/n.  Defaults to "no" for safety.
+# If nobody's at the keyboard (CI mode), we just keep rolling.
 ask() {
     local prompt="$1"
     local default="${2:-N}"
@@ -46,18 +58,74 @@ ask() {
     fi
 }
 
-# ─── SCANS ─────────────────────────────────────────────────────
+# ═══════════════════════════════════════════════════════════════
+#  THE CHECKS
+#  Each one looks at what you're about to commit and asks:
+#  "Did you really mean to do that?"
+# ═══════════════════════════════════════════════════════════════
 
+# ── Custom blocklist — your personal guardrail ────────────────
+# This one runs FIRST because it's the most personal.
+# You put your own patterns in .safepush-blocklist —
+# emails, phone numbers, internal project names, whatever
+# you never ever want to leak into a git history.
+# If anything matches, we BLOCK.  No questions asked.
+scan_blocklist() {
+    section "Custom blocklist  (.safepush-blocklist)"
+
+    local blocklist_file
+    blocklist_file=$(git rev-parse --show-toplevel 2>/dev/null)/.safepush-blocklist
+
+    # No blocklist?  No problem — we just skip this check.
+    if [ ! -f "$blocklist_file" ]; then
+        pass "No blocklist file found  (create .safepush-blocklist to enable)"
+        return 0
+    fi
+
+    local hits=0
+    # Read the blocklist line by line, skipping comments (#) and blanks
+    while IFS= read -r pattern; do
+        [[ -z "$pattern" || "$pattern" =~ ^[[:space:]]*# ]] && continue
+
+        # For each pattern, search the staged diff
+        while IFS= read -r line; do
+            [ -z "$line" ] && continue
+            hits=$((hits + 1))
+            if [ "$hits" -eq 1 ]; then
+                BLOCK_COMMIT=true
+                FOUND_ANYTHING=true
+                fail "Blocklisted pattern matched:"
+            fi
+            printf "    ${RED}→${NC} pattern: ${YELLOW}%s${NC}  →  %s\n" "$pattern" "$(echo "$line" | cut -c1-100)"
+        done < <(git diff --cached -U0 2>/dev/null | grep -nE "$pattern" 2>/dev/null || true)
+    done < "$blocklist_file"
+
+    if [ "$hits" -eq 0 ]; then
+        pass "No blocklist matches"
+    fi
+}
+
+# ── Secrets — the "oh no" check ──────────────────────────────
+# Looks for things shaped like API keys, tokens, and passwords.
+# We don't know for sure they're real secrets, but they sure
+# look like they could be, so we flag them.
+# Covers: generic key=value patterns, OpenAI keys, GitHub PATs,
+# AWS access keys, and Slack tokens.
 scan_secrets() {
     section "Secrets  (API keys, tokens, passwords…)"
 
     local patterns=(
+        # Generic key = "value" style secrets
         '[a-zA-Z0-9_]*[_-]?(api[_-]?key|apikey|API_KEY)\s*[=:]\s*['\''"][a-zA-Z0-9_-]{12,}['\''"]'
         '[a-zA-Z0-9_]*[_-]?(secret|SECRET)\s*[=:]\s*['\''"][a-zA-Z0-9_-]{8,}['\''"]'
         '[a-zA-Z0-9_]*[_-]?(token|TOKEN|access_token)\s*[=:]\s*['\''"][a-zA-Z0-9_.-]{12,}['\''"]'
         '[a-zA-Z0-9_]*[_-]?(password|PASSWORD|passwd)\s*[=:]\s*['\''"][^'\''"]{4,}['\''"]'
-        'sk-[a-zA-Z0-9]{20,}' 'ghp_[a-zA-Z0-9]{36}' 'github_pat_[a-zA-Z0-9_]{22,}'
-        'AKIA[0-9A-Z]{16}' 'xox[baprs]-[0-9a-zA-Z-]{10,}'
+        # Known service-specific patterns
+        'sk-[a-zA-Z0-9]{20,}'                              # OpenAI API key
+        'ghp_[a-zA-Z0-9]{36}'                               # GitHub classic PAT
+        'github_pat_[a-zA-Z0-9_]{22,}'                      # GitHub fine-grained PAT
+        'AKIA[0-9A-Z]{16}'                                  # AWS access key
+        'xox[baprs]-[0-9a-zA-Z-]{10,}'                      # Slack bot/user token
     )
 
     local hits=0
@@ -78,6 +146,10 @@ scan_secrets() {
     fi
 }
 
+# ── Sensitive files — "did you just stage a .env file?" ──────
+# Some filenames should never be committed.  Private keys,
+# environment files, credential JSONs — if it's new and it
+# looks sensitive, we flag it.
 scan_sensitive_files() {
     section "Sensitive files  (.env, keys, certs…)"
 
@@ -111,16 +183,19 @@ scan_sensitive_files() {
     fi
 }
 
+# ── Large files — "is that a 200MB video in your commit?" ────
+# Git is not a file server.  Files over 1 MB get flagged.
+# We show the human-readable size so you can judge.
 scan_large_files() {
     section "Large files  (≥ 1 MB)"
 
-    local threshold=1048576
+    local threshold=1048576   # 1 megabyte in bytes
     local hits=0
 
     while IFS= read -r line; do
         [ -z "$line" ] && continue
-        local sha=$(echo "$line" | awk '{print $4}')
-        local path=$(echo "$line" | cut -f2)
+        local sha=$(echo "$line" | awk '{print $4}')     # git blob hash
+        local path=$(echo "$line" | cut -f2)              # file path
         local size=$(git cat-file -s "$sha" 2>/dev/null || echo 0)
         if [ "$size" -gt "$threshold" ]; then
             hits=$((hits + 1))
@@ -137,6 +212,10 @@ scan_large_files() {
     fi
 }
 
+# ── Merge conflicts — "you forgot to finish resolving" ──────
+# If there are <<<<<<<, =======, or >>>>>>> markers in your
+# staged files, you probably missed a conflict during a merge.
+# This is a HARD BLOCK — there's no good reason to commit these.
 scan_merge_conflicts() {
     section "Merge conflict markers"
 
@@ -156,6 +235,23 @@ scan_merge_conflicts() {
     fi
 }
 
+# ── Debug prints — "did you leave a console.log in there?" ───
+# We all do it.  A quick debug print to check if the code works,
+# then we forget to remove it before committing.  This check
+# catches them so your PR reviewer doesn't have to.
+#
+# Covers 11 languages:
+#   JS/TS: console.log, console.warn, etc.
+#   Rust:  println!, dbg!
+#   Python: print()
+#   Go:    fmt.Println, fmt.Printf
+#   Java:  System.out.println
+#   C#:    Console.WriteLine, Debug.WriteLine
+#   Ruby:  puts, pp
+#   Kotlin: println
+#   PHP:   var_dump, dump()
+#   C/C++: printf()
+#   Bash:  echo
 scan_debug_prints() {
     section "Debug prints  (console.log, println!, dbg!, print())"
 
@@ -175,6 +271,10 @@ scan_debug_prints() {
     fi
 }
 
+# ── Trailing whitespace — tiny mess, easy fix ────────────────
+# Spaces at the end of lines.  They don't do anything, they
+# make diffs noisy, and some linters will yell at you.
+# If we find any, we offer to strip them right now.
 scan_trailing_whitespace() {
     section "Trailing whitespace"
 
@@ -189,6 +289,7 @@ scan_trailing_whitespace() {
     if [ "$hits" -gt 0 ]; then
         FOUND_ANYTHING=true
         if ask "Trailing whitespace found. Strip it now?"; then
+            # Fix each file: strip trailing spaces, then re-add to git
             local files=$(git diff --cached --name-only 2>/dev/null)
             for f in $files; do
                 [ ! -f "$f" ] && continue
@@ -202,18 +303,27 @@ scan_trailing_whitespace() {
     fi
 }
 
+# ── Lockfile drift — "you updated deps but forgot the lock" ──
+# If you change Cargo.toml but not Cargo.lock, that's probably
+# a mistake.  Same for package.json / package-lock.json, and
+# their Python and Go equivalents.  We just warn — sometimes
+# you meant to do that.
 scan_lockfile_sync() {
     section "Lockfile drift  (manifest changed, lockfile didn't)"
 
     local changed=$(git diff --cached --name-only 2>/dev/null || true)
     local hit=false
 
+    # Rust: Cargo.toml changed but Cargo.lock didn't
     if echo "$changed" | grep -q '^Cargo\.toml$' && ! echo "$changed" | grep -q '^Cargo\.lock$'; then
         warn "Cargo.toml changed but Cargo.lock was NOT updated"; hit=true; fi
+    # Node: package.json changed but package-lock.json didn't
     if echo "$changed" | grep -q '^package\.json$' && ! echo "$changed" | grep -q '^package-lock\.json$'; then
         warn "package.json changed but package-lock.json was NOT updated"; hit=true; fi
+    # Python: deps file changed but no lock update
     if echo "$changed" | grep -qE '^(pyproject\.toml|setup\.cfg|setup\.py)$' && ! echo "$changed" | grep -qE '(requirements.*\.txt|poetry\.lock|Pipfile\.lock)$'; then
         warn "Python deps changed but no lockfile update detected"; hit=true; fi
+    # Go: go.mod changed but go.sum didn't
     if echo "$changed" | grep -q '^go\.mod$' && ! echo "$changed" | grep -q '^go\.sum$'; then
         warn "go.mod changed but go.sum was NOT updated"; hit=true; fi
 
@@ -225,14 +335,19 @@ scan_lockfile_sync() {
     fi
 }
 
+# ── Hardcoded connections — "is that a prod DB URL?" ─────────
+# Database connection strings, raw IP addresses, JDBC URLs —
+# these probably belong in config or environment variables,
+# not hardcoded in source files.  We skip localhost because
+# that's fine for local dev.
 scan_hardcoded_connections() {
     section "Hardcoded connections  (DB URLs, IPs…)"
 
     local patterns=(
-        '(postgres|mysql|mongodb|redis|sqlite)://[^[:space:]]+'
-        '[a-z]+://[^@]+@[^[:space:]]+'
-        'jdbc:[^[:space:]]+'
-        '\b([0-9]{1,3}\.){3}[0-9]{1,3}\b'
+        '(postgres|mysql|mongodb|redis|sqlite)://[^[:space:]]+'   # database URLs
+        '[a-z]+://[^@]+@[^[:space:]]+'                             # user:pass@host URLs
+        'jdbc:[^[:space:]]+'                                        # Java JDBC strings
+        '\b([0-9]{1,3}\.){3}[0-9]{1,3}\b'                          # IPv4 addresses
     )
 
     local hits=0
@@ -242,6 +357,7 @@ scan_hardcoded_connections() {
             hits=$((hits + 1))
             [ "$hits" -eq 1 ] && warn "Hardcoded connections / IPs:"
             printf "    ${YELLOW}→${NC} %s\n" "$(echo "$line" | cut -c1-120)"
+            # Exclude localhost — that's fine for development
         done < <(git diff --cached -U0 2>/dev/null | grep -nE "$pattern" | grep -vE '(localhost|127\.0\.0\.1|0\.0\.0\.0|::1)' || true)
     done
 
@@ -253,6 +369,10 @@ scan_hardcoded_connections() {
     fi
 }
 
+# ── Absolute paths — "this won't work on anyone else's machine" ─
+# Hardcoded paths like /home/simon/project/... are machine-specific.
+# They'll break as soon as someone else clones your repo.
+# Use relative paths or environment variables instead.
 scan_absolute_paths() {
     section "Absolute paths  (/home/… that break elsewhere)"
 
@@ -272,39 +392,10 @@ scan_absolute_paths() {
     fi
 }
 
-scan_blocklist() {
-    section "Custom blocklist  (.safepush-blocklist)"
-
-    local blocklist_file
-    blocklist_file=$(git rev-parse --show-toplevel 2>/dev/null)/.safepush-blocklist
-
-    if [ ! -f "$blocklist_file" ]; then
-        pass "No blocklist file found  (create .safepush-blocklist to enable)"
-        return 0
-    fi
-
-    local hits=0
-    while IFS= read -r pattern; do
-        # Skip empty lines and comments
-        [[ -z "$pattern" || "$pattern" =~ ^[[:space:]]*# ]] && continue
-
-        while IFS= read -r line; do
-            [ -z "$line" ] && continue
-            hits=$((hits + 1))
-            if [ "$hits" -eq 1 ]; then
-                BLOCK_COMMIT=true
-                FOUND_ANYTHING=true
-                fail "Blocklisted pattern matched:"
-            fi
-            printf "    ${RED}→${NC} pattern: ${YELLOW}%s${NC}  →  %s\n" "$pattern" "$(echo "$line" | cut -c1-100)"
-        done < <(git diff --cached -U0 2>/dev/null | grep -nE "$pattern" 2>/dev/null || true)
-    done < "$blocklist_file"
-
-    if [ "$hits" -eq 0 ]; then
-        pass "No blocklist matches"
-    fi
-}
-
+# ── TODO / FIXME — "future you will thank present you" ───────
+# TODO, FIXME, HACK, XXX, TEMP, WORKAROUND — we've all written
+# them.  This check doesn't block, it just reminds you they're
+# there.  Maybe now's a good time to deal with one?
 scan_todos() {
     section "TODO / FIXME / HACK markers"
 
@@ -324,12 +415,16 @@ scan_todos() {
     fi
 }
 
-# ─── MAIN ──────────────────────────────────────────────────────
+# ═══════════════════════════════════════════════════════════════
+#  MAIN — where the magic happens
+#  Run every check, one after another, and decide the verdict.
+# ═══════════════════════════════════════════════════════════════
 
 echo ""
 printf "${BOLD}${CYAN}  pre-commit scan…${NC}\n"
 echo ""
 
+# Run them all!  Blocklist first (most personal), then everything else.
 scan_blocklist
 scan_secrets
 scan_sensitive_files
@@ -342,6 +437,7 @@ scan_hardcoded_connections
 scan_absolute_paths
 scan_todos
 
+# ── The verdict ───────────────────────────────────────────────
 echo ""
 if $BLOCK_COMMIT; then
     printf "${BOLD}${RED}  COMMIT BLOCKED${NC}\n"
