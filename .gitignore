@@ -1,0 +1,15 @@
+# Build artifacts
+/target/
+/debug/
+/release/
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+.DS_Store
+
+# Rust
+Cargo.lock

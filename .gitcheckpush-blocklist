@@ -1,0 +1,15 @@
+# .gitcheckpush-blocklist — patterns the pre-commit hook will BLOCK on push.
+# One pattern per line.  Supports basic grep -E regex.
+# Lines starting with # are comments.
+#
+# Examples:
+#   simon@example.com
+#   \+1-555-\d{3}-\d{4}
+#   secret-project-name
+#   internal\.company\.com
+#   192\.168\.\d+\.\d+
+#   AWS_ACCESS_KEY_ID
+
+# ── Add your personal patterns below ───────────────────────────
+
+simon@test.com

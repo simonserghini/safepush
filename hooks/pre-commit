@@ -52,9 +52,9 @@ scan_secrets() {
     section "Secrets  (API keys, tokens, passwords…)"
 
     local patterns=(
-        '[a-zA-Z0-9_]*[_-]?(api[_-]?key|apikey|API_KEY)\s*[=:]\s*['\''"][a-zA-Z0-9_\-]{12,}['\''"]'
-        '[a-zA-Z0-9_]*[_-]?(secret|SECRET)\s*[=:]\s*['\''"][a-zA-Z0-9_\-]{8,}['\''"]'
-        '[a-zA-Z0-9_]*[_-]?(token|TOKEN|access_token)\s*[=:]\s*['\''"][a-zA-Z0-9_\-.]{12,}['\''"]'
+        '[a-zA-Z0-9_]*[_-]?(api[_-]?key|apikey|API_KEY)\s*[=:]\s*['\''"][a-zA-Z0-9_-]{12,}['\''"]'
+        '[a-zA-Z0-9_]*[_-]?(secret|SECRET)\s*[=:]\s*['\''"][a-zA-Z0-9_-]{8,}['\''"]'
+        '[a-zA-Z0-9_]*[_-]?(token|TOKEN|access_token)\s*[=:]\s*['\''"][a-zA-Z0-9_.-]{12,}['\''"]'
         '[a-zA-Z0-9_]*[_-]?(password|PASSWORD|passwd)\s*[=:]\s*['\''"][^'\''"]{4,}['\''"]'
         'sk-[a-zA-Z0-9]{20,}' 'ghp_[a-zA-Z0-9]{36}' 'github_pat_[a-zA-Z0-9_]{22,}'
         'AKIA[0-9A-Z]{16}' 'xox[baprs]-[0-9a-zA-Z-]{10,}'
@@ -146,7 +146,7 @@ scan_merge_conflicts() {
         hits=$((hits + 1))
         [ "$hits" -eq 1 ] && fail "Leftover merge-conflict markers:"
         printf "    ${RED}→${NC} %s\n" "$line"
-    done < <(git diff --cached -U0 2>/dev/null | grep -nE '^(\+<<<<<<<|\+=======|\+>>>>>>>)' || true)
+    done < <(git diff --cached -U0 2>/dev/null | grep -nE '^([+]<<<<<<<|[+]=======|[+]>>>>>>>)' || true)
 
     if [ "$hits" -gt 0 ]; then
         BLOCK_COMMIT=true
@@ -165,7 +165,7 @@ scan_debug_prints() {
         hits=$((hits + 1))
         [ "$hits" -eq 1 ] && warn "Debug output in staged changes:"
         printf "    ${YELLOW}→${NC} %s\n" "$line"
-    done < <(git diff --cached -U0 2>/dev/null | grep -nE '^\+\s*(console\.(log|debug|warn)|println!|dbg!|print\(|printf\(|echo |var_dump|dump\()' || true)
+    done < <(git diff --cached -U0 2>/dev/null | grep -nE '^[+]\s*(console\.(log|debug|warn|error|info|trace)\(|fmt\.(Print|Println|Printf|Sprintf)\(|System\.(out|err)\.print(ln)?\(|(Console|Debug)\.Write(Line)?\(|println!|dbg!|\bprintln\b|print\(|printf\(|\becho\s|var_dump\(|dump\(|puts\b|\bpp\b)' || true)
 
     if [ "$hits" -gt 0 ]; then
         FOUND_ANYTHING=true
@@ -184,7 +184,7 @@ scan_trailing_whitespace() {
         hits=$((hits + 1))
         [ "$hits" -eq 1 ] && warn "Trailing whitespace found:"
         printf "    ${DIM}→${NC} %s\n" "$line"
-    done < <(git diff --cached -U0 2>/dev/null | grep -nE '^\+\s+$' || true)
+    done < <(git diff --cached -U0 2>/dev/null | grep -nE '^[+]\s+$' || true)
 
     if [ "$hits" -gt 0 ]; then
         FOUND_ANYTHING=true
@@ -262,13 +262,46 @@ scan_absolute_paths() {
         hits=$((hits + 1))
         [ "$hits" -eq 1 ] && warn "Absolute paths in staged changes:"
         printf "    ${YELLOW}→${NC} %s\n" "$line"
-    done < <(git diff --cached -U0 2>/dev/null | grep -nE '^\+.*(/home/|/Users/|/tmp/|/var/)' | grep -v '^\+\+\+' || true)
+    done < <(git diff --cached -U0 2>/dev/null | grep -nE '^[+].*(/home/|/Users/|/tmp/|/var/)' | grep -v '^[+]{3}' | grep -v 'grep -nE' || true)
 
     if [ "$hits" -gt 0 ]; then
         FOUND_ANYTHING=true
         ask "Absolute paths. Commit anyway?" || BLOCK_COMMIT=true
     else
         pass "Clean"
+    fi
+}
+
+scan_blocklist() {
+    section "Custom blocklist  (.gitcheckpush-blocklist)"
+
+    local blocklist_file
+    blocklist_file=$(git rev-parse --show-toplevel 2>/dev/null)/.gitcheckpush-blocklist
+
+    if [ ! -f "$blocklist_file" ]; then
+        pass "No blocklist file found  (create .gitcheckpush-blocklist to enable)"
+        return 0
+    fi
+
+    local hits=0
+    while IFS= read -r pattern; do
+        # Skip empty lines and comments
+        [[ -z "$pattern" || "$pattern" =~ ^[[:space:]]*# ]] && continue
+
+        while IFS= read -r line; do
+            [ -z "$line" ] && continue
+            hits=$((hits + 1))
+            if [ "$hits" -eq 1 ]; then
+                BLOCK_COMMIT=true
+                FOUND_ANYTHING=true
+                fail "Blocklisted pattern matched:"
+            fi
+            printf "    ${RED}→${NC} pattern: ${YELLOW}%s${NC}  →  %s\n" "$pattern" "$(echo "$line" | cut -c1-100)"
+        done < <(git diff --cached -U0 2>/dev/null | grep -nE "$pattern" 2>/dev/null || true)
+    done < "$blocklist_file"
+
+    if [ "$hits" -eq 0 ]; then
+        pass "No blocklist matches"
     fi
 }
 
@@ -281,7 +314,7 @@ scan_todos() {
         hits=$((hits + 1))
         [ "$hits" -eq 1 ] && info "You left these behind:"
         printf "    ${DIM}→${NC} %s\n" "$line"
-    done < <(git diff --cached -U0 2>/dev/null | grep -nE '^\+\s*(TODO|FIXME|HACK|XXX|TEMP|WORKAROUND)' || true)
+    done < <(git diff --cached -U0 2>/dev/null | grep -nE '^[+].*(TODO|FIXME|HACK|XXX|TEMP|WORKAROUND)\b' || true)
 
     if [ "$hits" -gt 0 ]; then
         FOUND_ANYTHING=true
@@ -297,6 +330,7 @@ echo ""
 printf "${BOLD}${CYAN}  pre-commit scan…${NC}\n"
 echo ""
 
+scan_blocklist
 scan_secrets
 scan_sensitive_files
 scan_large_files
