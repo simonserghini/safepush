@@ -305,7 +305,7 @@ scan_trailing_whitespace() {
         hits=$((hits + 1))
         [ "$hits" -eq 1 ] && warn "Trailing whitespace found:"
         printf "    ${DIM}→${NC} %s\n" "$line"
-    done < <(git diff --cached -U0 2>/dev/null | grep -nE '^[+]\s+$' || true)
+    done < <(git diff --cached -U0 2>/dev/null | grep -nE '^[+].*[[:space:]]+$' | grep -vE '^[+]{3}' || true)
 
     if [ "$hits" -gt 0 ]; then
         FOUND_ANYTHING=true
