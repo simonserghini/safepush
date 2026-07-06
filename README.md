@@ -75,3 +75,4 @@ In CI or scripts (non-TTY), all checks pass through without blocking.
 ## Language support
 
 Debug-prints check covers: JavaScript/TS, Rust, Python, Go, Java, C#, Ruby, Kotlin, PHP, C/C++, Bash.
+https://serghini.me/
