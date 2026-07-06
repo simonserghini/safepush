@@ -1,0 +1,397 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>safepush — Git hooks that scan your code before it leaves your machine</title>
+<meta name="description" content="safepush installs pre-commit and pre-push git hooks that scan your code for secrets, debug prints, merge conflicts, and more. One curl command, zero dependencies.">
+<style>
+  /* ── Reset & Variables ─────────────────────────────────── */
+  *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+  :root {
+    --bg:        #0d1117;
+    --surface:   #161b22;
+    --border:    #30363d;
+    --text:      #e6edf3;
+    --muted:     #8b949e;
+    --dim:       #484f58;
+    --green:     #3fb950;
+    --yellow:    #d29922;
+    --red:       #f85149;
+    --cyan:      #58a6ff;
+    --magenta:   #bc8cff;
+    --white:     #f0f6fc;
+    --radius:    8px;
+    --font:      'Inter', system-ui, -apple-system, sans-serif;
+    --mono:      'JetBrains Mono', 'Fira Code', 'Cascadia Code', monospace;
+  }
+
+  /* ── Base ──────────────────────────────────────────────── */
+  html { scroll-behavior: smooth; }
+  body {
+    background: var(--bg);
+    color: var(--text);
+    font-family: var(--font);
+    line-height: 1.6;
+    min-height: 100vh;
+    display: flex;
+    flex-direction: column;
+  }
+
+  /* ── Layout ────────────────────────────────────────────── */
+  .container { max-width: 960px; margin: 0 auto; padding: 0 24px; }
+  section { padding: 80px 0; }
+
+  /* ── Hero ──────────────────────────────────────────────── */
+  .hero {
+    text-align: center;
+    padding: 100px 0 60px;
+    position: relative;
+  }
+  .hero::after {
+    content: '';
+    position: absolute;
+    top: 0; left: 50%; transform: translateX(-50%);
+    width: 600px; height: 600px;
+    background: radial-gradient(circle, rgba(88,166,255,0.06) 0%, transparent 70%);
+    pointer-events: none;
+  }
+  .logo {
+    font-family: var(--mono);
+    font-size: 11px;
+    line-height: 1.3;
+    color: var(--cyan);
+    white-space: pre;
+    display: inline-block;
+    text-align: left;
+    margin-bottom: 32px;
+  }
+  .hero h1 {
+    font-size: clamp(32px, 5vw, 52px);
+    font-weight: 800;
+    letter-spacing: -0.02em;
+    margin-bottom: 16px;
+  }
+  .hero h1 span { color: var(--cyan); }
+  .hero .subtitle {
+    font-size: 18px;
+    color: var(--muted);
+    max-width: 500px;
+    margin: 0 auto 40px;
+  }
+
+  /* ── Curl command ──────────────────────────────────────── */
+  .curl-box {
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    padding: 20px 24px;
+    max-width: 620px;
+    margin: 0 auto;
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    position: relative;
+  }
+  .curl-box code {
+    font-family: var(--mono);
+    font-size: 14px;
+    color: var(--green);
+    flex: 1;
+    overflow-x: auto;
+    white-space: nowrap;
+    scrollbar-width: none;
+  }
+  .curl-box code::-webkit-scrollbar { display: none; }
+  .copy-btn {
+    background: var(--border);
+    border: none;
+    color: var(--text);
+    padding: 8px 14px;
+    border-radius: 6px;
+    font-family: var(--font);
+    font-size: 13px;
+    font-weight: 600;
+    cursor: pointer;
+    white-space: nowrap;
+    transition: background .15s;
+  }
+  .copy-btn:hover { background: #3a3f4b; }
+  .copy-btn.copied { background: var(--green); color: #000; }
+  .copy-btn.copied::after { content: ' ✓'; }
+
+  /* ── Section titles ────────────────────────────────────── */
+  .section-title {
+    text-align: center;
+    font-size: 28px;
+    font-weight: 700;
+    letter-spacing: -0.01em;
+    margin-bottom: 8px;
+  }
+  .section-sub {
+    text-align: center;
+    color: var(--muted);
+    margin-bottom: 48px;
+    font-size: 16px;
+  }
+
+  /* ── Checks grid ───────────────────────────────────────── */
+  .checks-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
+    gap: 16px;
+  }
+  .check-card {
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    padding: 20px;
+    transition: border-color .2s;
+  }
+  .check-card:hover { border-color: var(--dim); }
+  .check-card .severity {
+    font-size: 11px;
+    font-weight: 700;
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+    display: inline-block;
+    padding: 3px 8px;
+    border-radius: 4px;
+    margin-bottom: 10px;
+  }
+  .severity-block  { background: rgba(248,81,73,0.15); color: var(--red); }
+  .severity-warn  { background: rgba(210,153,34,0.15); color: var(--yellow); }
+  .severity-info  { background: rgba(88,166,255,0.12); color: var(--cyan); }
+  .check-card h3 { font-size: 16px; font-weight: 600; margin-bottom: 6px; }
+  .check-card p  { font-size: 13px; color: var(--muted); line-height: 1.5; }
+
+  /* ── Hook section tabs ─────────────────────────────────── */
+  .hook-tabs { display: flex; justify-content: center; gap: 8px; margin-bottom: 40px; }
+  .hook-tab {
+    background: var(--surface);
+    border: 1px solid var(--border);
+    color: var(--muted);
+    padding: 10px 28px;
+    border-radius: var(--radius);
+    font-family: var(--mono);
+    font-size: 14px;
+    cursor: pointer;
+    transition: all .15s;
+  }
+  .hook-tab.active {
+    background: var(--cyan);
+    border-color: var(--cyan);
+    color: #000;
+    font-weight: 700;
+  }
+  .hook-tab:hover:not(.active) { color: var(--text); border-color: var(--dim); }
+  .hook-content { display: none; }
+  .hook-content.active { display: block; }
+
+  /* ── Blocklist section ─────────────────────────────────── */
+  .blocklist-example {
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    padding: 24px;
+    max-width: 520px;
+    margin: 0 auto;
+  }
+  .blocklist-example pre {
+    font-family: var(--mono);
+    font-size: 13px;
+    color: var(--text);
+    line-height: 1.7;
+  }
+  .blocklist-example .comment { color: var(--dim); }
+  .blocklist-example .pattern { color: var(--yellow); }
+
+  /* ── Footer ────────────────────────────────────────────── */
+  footer {
+    text-align: center;
+    padding: 40px 0;
+    color: var(--dim);
+    font-size: 13px;
+    border-top: 1px solid var(--border);
+    margin-top: auto;
+  }
+  footer a { color: var(--cyan); text-decoration: none; }
+  footer a:hover { text-decoration: underline; }
+
+  /* ── Responsive ────────────────────────────────────────── */
+  @media (max-width: 640px) {
+    .hero { padding: 60px 0 40px; }
+    .logo { font-size: 8px; }
+    .curl-box { flex-direction: column; align-items: stretch; }
+    .curl-box code { white-space: normal; word-break: break-all; }
+    .copy-btn { text-align: center; }
+  }
+</style>
+</head>
+<body>
+
+<!-- ═══════════════════ HERO ═══════════════════ -->
+<section class="hero">
+  <div class="container">
+    <div class="logo">
+  ███████  █████  ███████ ███████ ██████  ██    ██ ███████ ██   ██
+  ██      ██   ██ ██      ██      ██   ██ ██    ██ ██      ██   ██
+  ███████ ███████ █████   █████   ██████  ██    ██ ███████ ███████
+       ██ ██   ██ ██      ██      ██      ██    ██      ██ ██   ██
+  ███████ ██   ██ ██      ███████ ██       ██████  ███████ ██   ██
+    </div>
+    <h1>Push with <span>confidence</span></h1>
+    <p class="subtitle">safepush scans your code before it leaves your machine. Secrets, debug prints, merge conflicts — caught before they hit the remote.</p>
+
+    <div class="curl-box">
+      <code>curl -sSL https://safepush.serghini.me/install.sh | bash</code>
+      <button class="copy-btn" onclick="copyCurl(this)">Copy</button>
+    </div>
+  </div>
+</section>
+
+<!-- ═══════════════ CHECKS ═══════════════ -->
+<section style="padding-top: 0;">
+  <div class="container">
+    <h2 class="section-title">What it checks</h2>
+    <p class="section-sub">16 checks across two hooks. No dependencies beyond bash and git.</p>
+
+    <div class="hook-tabs">
+      <button class="hook-tab active" onclick="switchTab('pre-commit')">pre-commit</button>
+      <button class="hook-tab" onclick="switchTab('pre-push')">pre-push</button>
+    </div>
+
+    <div id="pre-commit" class="hook-content active">
+      <div class="checks-grid">
+        <div class="check-card">
+          <span class="severity severity-block">BLOCK</span>
+          <h3>Custom blocklist</h3>
+          <p>Your personal patterns — emails, phone numbers, internal project names. Add them once, never leak them again.</p>
+        </div>
+        <div class="check-card">
+          <span class="severity severity-block">BLOCK</span>
+          <h3>Secrets</h3>
+          <p>API keys, tokens, passwords, AWS keys, GitHub PATs, Slack tokens — patterns for all major services.</p>
+        </div>
+        <div class="check-card">
+          <span class="severity severity-block">BLOCK</span>
+          <h3>Sensitive files</h3>
+          <p>.env, .pem, .key, id_rsa, credentials.json — files that should never be committed.</p>
+        </div>
+        <div class="check-card">
+          <span class="severity severity-block">BLOCK</span>
+          <h3>Merge conflicts</h3>
+          <p>Leftover &lt;&lt;&lt;&lt;&lt;&lt;&lt; markers. Hard block — no questions asked.</p>
+        </div>
+        <div class="check-card">
+          <span class="severity severity-warn">WARN</span>
+          <h3>Debug prints</h3>
+          <p>console.log, println!, fmt.Println, puts, and more across 11 languages.</p>
+        </div>
+        <div class="check-card">
+          <span class="severity severity-warn">WARN</span>
+          <h3>Large files</h3>
+          <p>Files ≥ 1 MB. Git is not a file server. Shows human-readable sizes.</p>
+        </div>
+        <div class="check-card">
+          <span class="severity severity-warn">WARN</span>
+          <h3>Trailing whitespace</h3>
+          <p>Finds trailing spaces and offers to strip them in-place. Auto re-stages the fix.</p>
+        </div>
+        <div class="check-card">
+          <span class="severity severity-warn">WARN</span>
+          <h3>Lockfile drift</h3>
+          <p>Cargo.toml changed but Cargo.lock didn't? Same for npm, pip, and go — we catch it.</p>
+        </div>
+        <div class="check-card">
+          <span class="severity severity-warn">WARN</span>
+          <h3>Hardcoded connections</h3>
+          <p>Database URLs, JDBC strings, raw IP addresses. These belong in config, not code.</p>
+        </div>
+        <div class="check-card">
+          <span class="severity severity-info">INFO</span>
+          <h3>Absolute paths</h3>
+          <p>/home/simon/project/... paths that break the moment someone else clones your repo.</p>
+        </div>
+        <div class="check-card">
+          <span class="severity severity-info">INFO</span>
+          <h3>TODO / FIXME</h3>
+          <p>Friendly reminder about the things you told yourself you'd get back to.</p>
+        </div>
+      </div>
+    </div>
+
+    <div id="pre-push" class="hook-content">
+      <div class="checks-grid">
+        <div class="check-card">
+          <span class="severity severity-block">BLOCK</span>
+          <h3>Force push</h3>
+          <p>Detects history rewrites. Asks very firmly before letting you delete other people's work.</p>
+        </div>
+        <div class="check-card">
+          <span class="severity severity-warn">WARN</span>
+          <h3>Protected branch</h3>
+          <p>Pushing straight to main/master? You probably meant to open a PR instead.</p>
+        </div>
+        <div class="check-card">
+          <span class="severity severity-warn">WARN</span>
+          <h3>Unstaged changes</h3>
+          <p>Modified tracked files that aren't staged — they won't be pushed. Did you forget?</p>
+        </div>
+        <div class="check-card">
+          <span class="severity severity-info">INFO</span>
+          <h3>Commit messages</h3>
+          <p>Messages under 8 chars flagged. "fix", "wip", "oops" — you can do better.</p>
+        </div>
+        <div class="check-card">
+          <span class="severity severity-info">INFO</span>
+          <h3>Untracked files</h3>
+          <p>Important-looking files not yet tracked. Maybe you meant to git add these?</p>
+        </div>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- ═══════════════ BLOCKLIST ═══════════════ -->
+<section style="padding-top: 0;">
+  <div class="container">
+    <h2 class="section-title">Your personal guardrail</h2>
+    <p class="section-sub">Create a .safepush-blocklist file. One pattern per line. Hard block on match.</p>
+    <div class="blocklist-example">
+      <pre><span class="comment"># .safepush-blocklist — patterns that will BLOCK the commit</span>
+<span class="pattern">simon@example.com</span>
+<span class="pattern">\+1-555-\d{3}-\d{4}</span>
+<span class="pattern">internal\.company\.com</span>
+<span class="pattern">192\.168\.\d+\.\d+</span>
+<span class="comment"># Lines starting with # are comments. Uses grep -E regex.</span></pre>
+    </div>
+  </div>
+</section>
+
+<!-- ═══════════════ FOOTER ═══════════════ -->
+<footer>
+  <div class="container">
+    <p>safepush — <a href="https://github.com/simonserghini/safepush">github.com/simonserghini/safepush</a></p>
+    <p style="margin-top: 4px;">Linux · macOS · WSL · Git Bash — zero dependencies beyond bash + git</p>
+  </div>
+</footer>
+
+<script>
+  function copyCurl(btn) {
+    navigator.clipboard.writeText("curl -sSL https://safepush.serghini.me/install.sh | bash");
+    btn.classList.add('copied');
+    btn.textContent = 'Copied';
+    setTimeout(() => { btn.classList.remove('copied'); btn.textContent = 'Copy'; }, 2000);
+  }
+
+  function switchTab(name) {
+    document.querySelectorAll('.hook-tab').forEach(t => t.classList.remove('active'));
+    document.querySelectorAll('.hook-content').forEach(c => c.classList.remove('active'));
+    document.querySelector(`.hook-tab[onclick*="${name}"]`).classList.add('active');
+    document.getElementById(name).classList.add('active');
+  }
+</script>
+
+</body>
+</html>
