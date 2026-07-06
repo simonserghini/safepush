@@ -7,7 +7,7 @@
 # │                                                             │
 # │  Usage:                                                     │
 # │    cd /path/to/your/project                                 │
-# │    curl -sSL https://raw.../safepush/master/install.sh | bash │
+# │    curl -sSL https://raw.../safepush/main/install.sh | bash │
 # │                                                             │
 # │  Or if you already cloned safepush:                        │
 # │    ./install.sh                                             │
@@ -18,7 +18,7 @@ set -euo pipefail
 # If you forked safepush, change these to point to your copy.
 GITHUB_USER="${GITHUB_USER:-simon}"
 GITHUB_REPO="${GITHUB_REPO:-safepush}"
-GITHUB_BRANCH="${GITHUB_BRANCH:-master}"
+GITHUB_BRANCH="${GITHUB_BRANCH:-main}"
 BASE_URL="https://raw.githubusercontent.com/${GITHUB_USER}/${GITHUB_REPO}/${GITHUB_BRANCH}"
 
 # ── Make sure we're inside a git repo ─────────────────────────
