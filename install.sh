@@ -36,6 +36,12 @@ HOOKS_DIR="${GIT_DIR}/hooks"
 UNINSTALL=false
 FORCE=false
 
+# ── TTY detection ──────────────────────────────────────────────
+# /dev/tty is the controlling terminal — works even when stdin is
+# a pipe (curl | bash). Falls back to /dev/null in true headless.
+TTY=/dev/tty
+if [ ! -c "$TTY" ]; then TTY=/dev/null; fi
+
 for arg in "$@"; do
     case "$arg" in
         --uninstall)                UNINSTALL=true ;;
@@ -94,10 +100,10 @@ if $UNINSTALL; then
         if $FORCE; then
             rm -f "$BLOCKLIST"
             echo "  ✓ removed .safepush-blocklist"
-        elif [ -t 0 ]; then
+        elif [ "$TTY" != /dev/null ]; then
             echo ""
             echo -n "  Remove .safepush-blocklist too? [y/N] "
-            read -r answer || true
+            read -r answer < "$TTY" 2>/dev/null || true
             if [ "$answer" = "y" ] || [ "$answer" = "Y" ]; then
                 rm -f "$BLOCKLIST"
                 echo "  ✓ removed .safepush-blocklist"
@@ -134,7 +140,7 @@ if $ALREADY_INSTALLED; then
     echo ""
     echo "  🔐 safepush is already installed in this repo."
 
-    if [ -t 0 ]; then
+    if [ "$TTY" != /dev/null ]; then
         echo ""
         echo "  What would you like to do?"
         echo "    [R] reinstall  — replace hooks with the latest version"
@@ -142,7 +148,7 @@ if $ALREADY_INSTALLED; then
         echo "    [Q] quit       — leave everything as-is"
         echo ""
         echo -n "  [R/u/q]: "
-        read -r choice || true
+        read -r choice < "$TTY" 2>/dev/null || true
         choice=$(echo "$choice" | xargs | tr '[:upper:]' '[:lower:]')
 
         case "$choice" in
@@ -191,7 +197,7 @@ if $ALREADY_INSTALLED; then
             if [ -f "$BLOCKLIST" ]; then
                 echo ""
                 echo -n "  Remove .safepush-blocklist too? [y/N] "
-                read -r answer || true
+                read -r answer < "$TTY" 2>/dev/null || true
                 if [ "$answer" = "y" ] || [ "$answer" = "Y" ]; then
                     rm -f "$BLOCKLIST"
                     echo "  ✓ removed .safepush-blocklist"
@@ -297,7 +303,7 @@ setup_blocklist() {
 
     # -- Email(s) --
     echo -n "  Your email(s)  [comma-separated, or enter to skip]: "
-    read -r raw_emails || true
+    read -r raw_emails < "$TTY" 2>/dev/null || true
     raw_emails=$(echo "$raw_emails" | xargs)
     if [ -n "$raw_emails" ]; then
         echo "# Emails" >> "$blocklist"
@@ -313,7 +319,7 @@ setup_blocklist() {
 
     # -- Phone number(s) --
     echo -n "  Your phone(s)  [comma-separated, or enter to skip]: "
-    read -r raw_phones || true
+    read -r raw_phones < "$TTY" 2>/dev/null || true
     raw_phones=$(echo "$raw_phones" | xargs)
     if [ -n "$raw_phones" ]; then
         echo "# Phone numbers" >> "$blocklist"
@@ -334,7 +340,7 @@ setup_blocklist() {
     local n=1
     while true; do
         echo -n "    $n: "
-        read -r pattern || break
+        read -r pattern < "$TTY" 2>/dev/null || break
         pattern=$(echo "$pattern" | xargs)
         if [ -z "$pattern" ]; then
             break
@@ -348,9 +354,9 @@ setup_blocklist() {
     echo "  ✓ .safepush-blocklist saved"
 }
 
-# Only run interactively when stdin is a terminal.
-# In CI or pipe mode, skip and let the user edit manually.
-if [ -t 0 ]; then
+# Only run interactively when a terminal is available (via /dev/tty).
+# In true headless/CI mode, skip and let the user edit manually.
+if [ "$TTY" != /dev/null ]; then
     setup_blocklist
 else
     # Fall back: download the example blocklist.
