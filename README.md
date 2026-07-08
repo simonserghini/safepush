@@ -15,7 +15,7 @@ Better safe than sorry.
 
 ```bash
 cd /path/to/your/project
-curl -sSL https://raw.githubusercontent.com/simon/safepush/main/install.sh | bash
+curl -sSL https://raw.githubusercontent.com/simonserghini/safepush/main/install.sh | bash
 ```
 
 That's it. Now every `git commit` and `git push` in that repo will run through the checks.

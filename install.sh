@@ -16,7 +16,7 @@ set -euo pipefail
 
 # ── Where to fetch from on GitHub ─────────────────────────────
 # If you forked safepush, change these to point to your copy.
-GITHUB_USER="${GITHUB_USER:-simon}"
+GITHUB_USER="${GITHUB_USER:-simonserghini}"
 GITHUB_REPO="${GITHUB_REPO:-safepush}"
 GITHUB_BRANCH="${GITHUB_BRANCH:-main}"
 BASE_URL="https://raw.githubusercontent.com/${GITHUB_USER}/${GITHUB_REPO}/${GITHUB_BRANCH}"
