@@ -32,6 +32,89 @@ GIT_DIR=$(git rev-parse --git-dir 2>/dev/null) || {
 # This is where git keeps its hooks — every repo has one.
 HOOKS_DIR="${GIT_DIR}/hooks"
 
+# ── CLI flags ──────────────────────────────────────────────────
+UNINSTALL=false
+FORCE=false
+
+for arg in "$@"; do
+    case "$arg" in
+        --uninstall)                UNINSTALL=true ;;
+        --remove-blocklist|-y|--yes) FORCE=true ;;
+        -h|--help)
+            echo ""
+            echo "  safepush installer"
+            echo ""
+            echo "  Usage:"
+            echo "    ./install.sh               Install hooks + interactive blocklist setup"
+            echo "    ./install.sh --uninstall   Remove safepush hooks from this repo"
+            echo "    ./install.sh --uninstall --remove-blocklist   Also delete .safepush-blocklist"
+            echo ""
+            exit 0
+            ;;
+        *)
+            echo "  Unknown flag: $arg   (try --help)"
+            exit 1
+            ;;
+    esac
+done
+
+# ── Uninstall ──────────────────────────────────────────────────
+if $UNINSTALL; then
+    removed=0
+
+    uninstall_hook() {
+        local name="$1"
+        local target="$HOOKS_DIR/$name"
+
+        if [ -f "$target" ] || [ -L "$target" ]; then
+            if grep -qi 'safepush' "$target" 2>/dev/null; then
+                rm -f "$target"
+                echo "  ✓ removed $name"
+                removed=$((removed + 1))
+            else
+                echo "  ⓘ  $name is not a safepush hook — skipping"
+            fi
+        else
+            echo "  ⓘ  $name not found — nothing to do"
+        fi
+    }
+
+    echo ""
+    echo "  🔐 safepush — uninstalling…"
+    echo ""
+
+    uninstall_hook "pre-commit"
+    uninstall_hook "pre-push"
+
+    # Blocklist
+    REPO_ROOT=$(git rev-parse --show-toplevel 2>/dev/null)
+    BLOCKLIST="$REPO_ROOT/.safepush-blocklist"
+
+    if [ -f "$BLOCKLIST" ]; then
+        if $FORCE; then
+            rm -f "$BLOCKLIST"
+            echo "  ✓ removed .safepush-blocklist"
+        elif [ -t 0 ]; then
+            echo ""
+            echo -n "  Remove .safepush-blocklist too? [y/N] "
+            read -r answer || true
+            if [ "$answer" = "y" ] || [ "$answer" = "Y" ]; then
+                rm -f "$BLOCKLIST"
+                echo "  ✓ removed .safepush-blocklist"
+            else
+                echo "  ⓘ  kept .safepush-blocklist"
+            fi
+        else
+            echo "  ⓘ  .safepush-blocklist exists (use --remove-blocklist to remove)"
+        fi
+    fi
+
+    echo ""
+    echo "  Done — $removed hook(s) removed."
+    echo ""
+    exit 0
+fi
+
 # ── Are we inside a safepush clone, or just some project? ────
 # If the hooks already exist locally, we symlink them (faster,
 # and edits to the source take effect immediately).
