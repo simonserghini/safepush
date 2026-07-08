@@ -115,6 +115,101 @@ if $UNINSTALL; then
     exit 0
 fi
 
+# ── Helper — is this a safepush hook? ──────────────────────────
+is_safepush_hook() {
+    local hook_path="$1"
+    [ -f "$hook_path" ] || [ -L "$hook_path" ] || return 1
+    grep -qi 'safepush' "$hook_path" 2>/dev/null
+}
+
+# ── Already installed? ─────────────────────────────────────────
+# Check if safepush hooks are already in .git/hooks/.
+# If so, offer to reinstall or uninstall (interactive only).
+ALREADY_INSTALLED=false
+if is_safepush_hook "$HOOKS_DIR/pre-commit" && is_safepush_hook "$HOOKS_DIR/pre-push"; then
+    ALREADY_INSTALLED=true
+fi
+
+if $ALREADY_INSTALLED; then
+    echo ""
+    echo "  🔐 safepush is already installed in this repo."
+
+    if [ -t 0 ]; then
+        echo ""
+        echo "  What would you like to do?"
+        echo "    [R] reinstall  — replace hooks with the latest version"
+        echo "    [U] uninstall  — remove safepush from this repo"
+        echo "    [Q] quit       — leave everything as-is"
+        echo ""
+        echo -n "  [R/u/q]: "
+        read -r choice || true
+        choice=$(echo "$choice" | xargs | tr '[:upper:]' '[:lower:]')
+
+        case "$choice" in
+            u|uninstall)
+                UNINSTALL=true
+                FORCE=false
+                ;;
+            r|reinstall|"")
+                # Proceed with install below — hooks will be replaced.
+                ;;
+            q|quit)
+                echo "  ✗ cancelled"
+                exit 0
+                ;;
+            *)
+                echo "  ⓘ  unrecognized choice — reinstalling"
+                ;;
+        esac
+
+        if $UNINSTALL; then
+            # Reuse the uninstall logic inline.
+            removed=0
+
+            uninstall_hook() {
+                local name="$1"
+                local target="$HOOKS_DIR/$name"
+                if is_safepush_hook "$target"; then
+                    rm -f "$target"
+                    echo "  ✓ removed $name"
+                    removed=$((removed + 1))
+                else
+                    echo "  ⓘ  $name is not a safepush hook — skipping"
+                fi
+            }
+
+            echo ""
+            echo "  🔐 safepush — uninstalling…"
+            echo ""
+
+            uninstall_hook "pre-commit"
+            uninstall_hook "pre-push"
+
+            REPO_ROOT=$(git rev-parse --show-toplevel 2>/dev/null)
+            BLOCKLIST="$REPO_ROOT/.safepush-blocklist"
+
+            if [ -f "$BLOCKLIST" ]; then
+                echo ""
+                echo -n "  Remove .safepush-blocklist too? [y/N] "
+                read -r answer || true
+                if [ "$answer" = "y" ] || [ "$answer" = "Y" ]; then
+                    rm -f "$BLOCKLIST"
+                    echo "  ✓ removed .safepush-blocklist"
+                else
+                    echo "  ⓘ  kept .safepush-blocklist"
+                fi
+            fi
+
+            echo ""
+            echo "  Done — $removed hook(s) removed."
+            echo ""
+            exit 0
+        fi
+    else
+        echo "  ⓘ  non-interactive — reinstalling with latest hooks."
+    fi
+fi
+
 # ── Are we inside a safepush clone, or just some project? ────
 # If the hooks already exist locally, we symlink them (faster,
 # and edits to the source take effect immediately).
