@@ -54,6 +54,31 @@ Or if you've cloned this repo:
 | Commit messages | INFO | Messages under 8 characters |
 | Untracked files | INFO | Files you might have forgotten |
 
+## ☁️ Cloud scanner
+
+Scan any GitHub repo — or your entire profile — for secrets, API keys, tokens, debug prints, and more. Runs on Cloudflare Workers. No install needed.
+
+[![Deploy to Cloudflare Workers](https://deploy.workers.cloudflare.com/button)](https://deploy.workers.cloudflare.com/?url=https://github.com/simonserghini/safepush&directory=worker)
+
+Click the button above, then:
+
+```bash
+# Scan a single repo
+curl -X POST https://your-worker.workers.dev/scan \
+  -H 'content-type: application/json' \
+  -d '{"owner":"simonserghini","repo":"safepush"}'
+
+# Scan an entire GitHub profile
+curl -X POST https://your-worker.workers.dev/scan-profile \
+  -H 'content-type: application/json' \
+  -d '{"username":"some-user"}'
+
+# Add a webhook to scan every push automatically
+# (GitHub → Settings → Webhooks → Payload URL: https://your-worker.workers.dev/webhook)
+```
+
+Supply a GitHub token via the `x-github-token` header to scan private repos.
+
 ## Custom blocklist
 
 Create a `.safepush-blocklist` file in your repo root with one pattern per line:
