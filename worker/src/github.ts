@@ -138,7 +138,11 @@ export async function getFileContent(
   if (!resp.ok) return null;
   const data = await resp.json() as any;
   if (!data.content) return null;
-  return atob(data.content.replace(/\n/g, ""));
+  // Use TextDecoder for proper UTF-8 — atob only handles Latin-1
+  const raw = atob(data.content.replace(/\n/g, ""));
+  const bytes = new Uint8Array(raw.length);
+  for (let i = 0; i < raw.length; i++) bytes[i] = raw.charCodeAt(i);
+  return new TextDecoder("utf-8").decode(bytes);
 }
 
 export async function listUserRepos(

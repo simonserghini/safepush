@@ -111,28 +111,38 @@ const SENSITIVE_FILE_PATTERNS = [
   /\.npmrc$/, /\.pypirc$/, /\.netrc$/, /\.dockercfg$/,
 ];
 
-// ── Debug print patterns — smarter: exclude legitimate shell output ──
+// ── Debug print patterns — per-language rules ──
 // console.error/warn/info are often intentional in production — flag at INFO, not WARN.
-const DEBUG_PRINT_PATTERNS: { regex: RegExp; label: string; severity?: "WARN" | "INFO" }[] = [
+
+interface DebugPattern {
+  regex: RegExp;
+  label: string;
+  severity?: "WARN" | "INFO";
+  // Per-language restriction: only apply to files with these extensions
+  extensions?: string[];
+}
+
+const DEBUG_PRINT_PATTERNS: DebugPattern[] = [
   // Real debug (WARN — likely unintentional)
-  { regex: /^\s*console\.(log|debug|trace|dir)\(/, label: "Debug print (console)", severity: "WARN" },
-  { regex: /^\s*console\.(warn|error|info)\(/, label: "Console output (likely intentional)", severity: "INFO" },
-  { regex: /^\s*fmt\.(Print|Println|Printf|Sprintf)\(/, label: "Debug print (Go)" },
-  { regex: /^\s*(System\.(out|err)\.print(ln)?|System\.err\.println)\(/, label: "Debug print (Java)" },
-  { regex: /^\s*(Console|Debug)\.Write(Line)?\(/, label: "Debug print (C#)" },
-  { regex: /^\s*println!\s*\(/, label: "Debug print (Rust)" },
-  { regex: /^\s*dbg!\s*\(/, label: "Debug print (Rust)" },
-  { regex: /^\s*\bvar_dump\s*\(/, label: "Debug print (PHP)" },
-  { regex: /^\s*\bdump\s*\(/, label: "Debug print (PHP/Symfony)" },
-  { regex: /^\s*\bpp\s/, label: "Debug print (Python pp)" },
-  { regex: /^\s*print\s*\(/, label: "Debug print (Python)" },
+  { regex: /^\s*console\.(log|debug|trace|dir)\(/, label: "Debug print (console)", severity: "WARN", extensions: ["js", "ts", "jsx", "tsx", "mjs", "cjs"] },
+  { regex: /^\s*console\.(warn|error|info)\(/, label: "Console output (likely intentional)", severity: "INFO", extensions: ["js", "ts", "jsx", "tsx", "mjs", "cjs"] },
+  { regex: /^\s*fmt\.(Print|Println|Printf|Sprintf)\(/, label: "Debug print (Go)", extensions: ["go"] },
+  { regex: /^\s*(System\.(out|err)\.print(ln)?|System\.err\.println)\(/, label: "Debug print (Java)", extensions: ["java", "kt", "scala"] },
+  { regex: /^\s*(Console|Debug)\.Write(Line)?\(/, label: "Debug print (C#)", extensions: ["cs"] },
+  { regex: /^\s*println!\s*\(/, label: "Debug print (Rust)", extensions: ["rs"] },
+  { regex: /^\s*dbg!\s*\(/, label: "Debug print (Rust)", extensions: ["rs"] },
+  { regex: /^\s*\bvar_dump\s*\(/, label: "Debug print (PHP)", extensions: ["php"] },
+  { regex: /^\s*\bdump\s*\(/, label: "Debug print (PHP/Symfony)", extensions: ["php"] },
+  { regex: /^\s*\bpp\s/, label: "Debug print (Python pp)", extensions: ["py"] },
+  { regex: /^\s*print\s*\(/, label: "Debug print (Python)", extensions: ["py"] },
+  { regex: /^\s*\bputs\b/, label: "Debug print (Ruby)", extensions: ["rb"] },
+  { regex: /^\s*\bprint\s/, label: "Debug print (Ruby)", extensions: ["rb"] },
 
-  // Shell echo — only flag if it looks like debugging (contains variable references)
-  { regex: /^\s*echo\s+(?:.*(?:\$\{|\$[A-Za-z_]).*){2,}/, label: "Debug echo (shell)" },
-
-  // Ruby
-  { regex: /^\s*\bputs\b/, label: "Debug print (Ruby)" },
-  { regex: /^\s*\bprint\s/, label: "Debug print (Ruby)" },
+  // ── Shell (.sh, .bash, .zsh) — echo is standard UI, only flag genuine debug leftovers ──
+  // Explicit debug markers in echo or comments
+  { regex: /^\s*echo\s+.*(?:DEBUG[:\]]|\[DEBUG\]|#\s*debug)/i, label: "Debug echo (explicit marker)", severity: "INFO", extensions: ["sh", "bash", "zsh"] },
+  // set -x / set -o xtrace left active (not inside a guarded block)
+  { regex: /^\s*set\s+[-+]\s*x\b|^\s*set\s+-o\s+xtrace\b/, label: "Shell xtrace left active", severity: "INFO", extensions: ["sh", "bash", "zsh"] },
 ];
 
 // ── Merge conflict markers ──
@@ -305,7 +315,8 @@ export function scanFile(path: string, content: string, options?: ScanOptions): 
   }
 
   // ── Debug prints ──
-  for (const { regex, label, severity: sev } of DEBUG_PRINT_PATTERNS) {
+  for (const { regex, label, severity: sev, extensions: exts } of DEBUG_PRINT_PATTERNS) {
+    if (exts && !exts.includes(ext)) continue; // per-language rule — skip if extension doesn't match
     for (let i = 0; i < lines.length; i++) {
       const line = lines[i];
       if (isComment(line, path)) continue;
