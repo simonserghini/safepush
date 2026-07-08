@@ -58,7 +58,7 @@ Or if you've cloned this repo:
 
 Scan any GitHub repo — or your entire profile — for secrets, API keys, tokens, debug prints, and more. Runs on Cloudflare Workers. No install needed.
 
-[![Deploy to Cloudflare Workers](https://deploy.workers.cloudflare.com/button)](https://deploy.workers.cloudflare.com/?url=https://github.com/simonserghini/safepush&directory=worker)
+[![Deploy to Cloudflare Workers](https://deploy.workers.cloudflare.com/button)](https://deploy.workers.cloudflare.com/?url=https://github.com/simonserghini/safepush)
 
 Click the button above, then:
 
