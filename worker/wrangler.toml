@@ -1,0 +1,16 @@
+name = "safepush"
+main = "src/index.ts"
+compatibility_date = "2026-07-08"
+
+[[kv_namespaces]]
+binding = "SCANS"
+id = "SAFEPUSH_SCANS_KV"
+preview_id = "SAFEPUSH_SCANS_KV_PREVIEW"
+
+[env.production]
+[[kv_namespaces]]
+binding = "SCANS"
+id = "SAFEPUSH_SCANS_KV"
+
+[vars]
+DASHBOARD_TITLE = "safepush — cloud scanner"
