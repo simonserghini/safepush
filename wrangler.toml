@@ -1,5 +1,5 @@
 name = "safepush"
-main = "src/index.ts"
+main = "worker/src/index.ts"
 compatibility_date = "2026-07-08"
 
 [[kv_namespaces]]
@@ -23,8 +23,8 @@ id = "SAFEPUSH_SESSIONS_KV"
 [vars]
 DASHBOARD_TITLE = "safepush — cloud scanner"
 
-# Set these in Cloudflare Dashboard (not here — they're secrets):
+# Secrets — set these in Cloudflare Dashboard:
 # GITHUB_CLIENT_ID     — GitHub OAuth App client ID
 # GITHUB_CLIENT_SECRET — GitHub OAuth App client secret
-# WEBHOOK_SECRET       — Shared secret for webhook signature verification
-# BASE_URL             — Your worker URL (e.g. https://safepush.workers.dev)
+# WEBHOOK_SECRET       — Shared secret for webhook HMAC
+# BASE_URL             — Your deployed worker URL
