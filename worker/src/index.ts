@@ -38,6 +38,49 @@ export interface Env {
   BASE_URL: string;
 }
 
+// ── SARIF export ──────────────────────────────────────────
+
+function toSarif(result: ScanResult): any {
+  const rules = new Map<string, { id: string; name: string; severity: string }>();
+  const results: any[] = [];
+
+  for (const m of result.matches) {
+    const ruleId = m.check;
+    if (!rules.has(ruleId)) {
+      rules.set(ruleId, {
+        id: ruleId,
+        name: m.check.replace(/_/g, " "),
+        severity: m.severity === "BLOCK" ? "error" : m.severity === "WARN" ? "warning" : "note",
+      });
+    }
+    results.push({
+      ruleId,
+      message: { text: `${m.pattern}: ${m.line}` },
+      locations: [{
+        physicalLocation: {
+          artifactLocation: { uri: m.path },
+          region: { startLine: m.lineNumber || 1 },
+        },
+      }],
+    });
+  }
+
+  return {
+    version: "2.1.0",
+    "$schema": "https://json.schemastore.org/sarif-2.1.0.json",
+    runs: [{
+      tool: {
+        driver: {
+          name: "safepush",
+          informationUri: "https://safepush.serghini.me",
+          rules: Array.from(rules.values()),
+        },
+      },
+      results,
+    }],
+  };
+}
+
 function json(body: any, status = 200): Response {
   return new Response(JSON.stringify(body, null, 2), {
     status,
@@ -183,6 +226,17 @@ async function scanRepo(
   const info = await getRepoInfo(owner, repo, token);
   if (!info) throw new Error(`Repo ${owner}/${repo} not found or access denied`);
 
+  // Fetch .safepushignore from repo root for path-level ignores
+  let ignorePaths: string[] = [];
+  try {
+    const ignoreContent = await getFileContent(owner, repo, ".safepushignore", info.defaultBranch, token);
+    if (ignoreContent) {
+      ignorePaths = ignoreContent.split("\n")
+        .map(l => l.trim())
+        .filter(l => l && !l.startsWith("#"));
+    }
+  } catch {}
+
   const files = await listRepoFiles(owner, repo, info.defaultBranch, token);
   const allMatches: ScanMatch[] = [];
 
@@ -196,7 +250,9 @@ async function scanRepo(
 
     try {
       const content = await getFileContent(owner, repo, f.path, info.defaultBranch, token);
-      if (content) allMatches.push(...scanFile(f.path, content));
+      if (content) {
+        allMatches.push(...scanFile(f.path, content, { ignorePaths }));
+      }
     } catch {}
   }
 
@@ -217,10 +273,12 @@ async function handleScan(request: Request, env: Env): Promise<Response> {
   if (!owner || !repo) return json({ error: "owner and repo are required" }, 400);
 
   const token = await extractToken(request, env);
+  const format = new URL(request.url).searchParams.get("format");
 
   try {
     const result = await scanRepo(owner, repo, token);
     await env.SCANS.put(`scan:${owner}:${repo}`, JSON.stringify(result), { expirationTtl: 86400 * 7 });
+    if (format === "sarif") return json(toSarif(result));
     return json(result);
   } catch (e: any) {
     return json({ error: e.message }, 500);
@@ -552,7 +610,7 @@ async function handleDashboardUI(request: Request, env: Env): Promise<Response> 
         <td style="font-family:monospace">${r.owner}/${r.repo}</td>
         <td style="color:#8b949e;font-size:12px">${r.addedAt.slice(0,10)}</td>
         <td><a href="/scan/${r.owner}/${r.repo}" style="color:#58a6ff">view</a></td>
-        <td><button onclick="removeRepo('${r.owner}','${r.repo}')" style="background:none;border:none;color:#f85149;cursor:pointer;font-size:16px">&times;</button></td>
+        <td><button onclick="removeRepoBtn('${r.owner}','${r.repo}')" style="background:none;border:none;color:#f85149;cursor:pointer;font-size:16px">&times;</button></td>
       </tr>`).join("");
 
   return html(`<!DOCTYPE html>
@@ -624,7 +682,7 @@ async function handleDashboardUI(request: Request, env: Env): Promise<Response> 
   <div class="section-title" style="margin-top:24px"><span>🔍 Load your repos</span></div>
   <div style="display:flex;gap:12px;margin-bottom:16px;flex-wrap:wrap;align-items:center">
     <input id="repo-owner" placeholder="GitHub username or org" value="${username}" style="background:#0d1117;border:1px solid #30363d;color:#e6edf3;padding:10px 14px;border-radius:6px;font-size:14px;width:240px">
-    <button class="btn btn-outline" onclick="loadRepos()">Load Repos</button>
+    <button class="btn btn-outline" onclick="loadRepos()" id="btn-load">Load Repos</button>
     <button class="btn btn-blue" onclick="trackAll()">+ Track All</button>
     <span id="load-status" style="font-size:13px;color:#8b949e"></span>
   </div>
@@ -634,7 +692,7 @@ async function handleDashboardUI(request: Request, env: Env): Promise<Response> 
   <div class="add-form">
     <input id="owner" placeholder="owner" value="${username}" style="flex:1;min-width:140px">
     <input id="repo" placeholder="repo name" style="flex:1;min-width:140px">
-    <button class="btn btn-green" onclick="addRepo()">+ Add</button>
+    <button class="btn btn-green" onclick="addRepoBtn()">+ Add</button>
   </div>
 
   <table>
@@ -654,140 +712,84 @@ async function handleDashboardUI(request: Request, env: Env): Promise<Response> 
 </div>
 
 <script>
-const SESSION = "${sessionId}";
-const BASE = "${env.BASE_URL || `https://${new URL(request.url).host}`}";
-const TRACKED = ${JSON.stringify(repos.map(r => r.owner + '/' + r.repo))};
+var SESSION = "${sessionId}";
+var BASE = "${env.BASE_URL || `https://${new URL(request.url).host}`}";
+var trackedSet = {};
+${repos.map(r => 'trackedSet["' + r.owner + '/' + r.repo + '"]=1;').join('\n')}
 
-async function api(method, path, body) {
-  const opts = { method, headers: { 'content-type': 'application/json', 'x-safepush-session': SESSION } };
-  if (body) opts.body = JSON.stringify(body);
-  const r = await fetch(BASE + path, opts);
-  return r.json();
+function api(method, path, body) {
+  var opts = {method:method,headers:{'content-type':'application/json','x-safepush-session':SESSION},credentials:'same-origin'};
+  if(body) opts.body = JSON.stringify(body);
+  return fetch(BASE+path,opts).then(function(r){return r.json();}).then(function(d){if(d.error)throw new Error(d.error);return d;});
 }
 
-async function addRepo() {
-  const owner = document.getElementById('owner').value.trim();
-  const repo = document.getElementById('repo').value.trim();
-  if (!owner || !repo) return alert('Fill both fields');
-  const res = await api('POST', '/tracked', { owner, repo });
-  if (res.error) return alert(res.error);
-  location.reload();
+function addRepoBtn() {
+  var o=document.getElementById('owner').value.trim(), r=document.getElementById('repo').value.trim();
+  if(!o||!r){alert('Fill both fields');return;}
+  api('POST','/tracked',{owner:o,repo:r}).then(function(){location.reload();}).catch(function(e){alert(e.message);});
 }
 
-async function removeRepo(owner, repo) {
-  await api('DELETE', '/tracked/' + owner + '/' + repo);
-  location.reload();
+function removeRepoBtn(owner,repo) {
+  api('DELETE','/tracked/'+owner+'/'+repo).then(function(){location.reload();});
 }
 
-async function scanAll() {
-  const rows = document.querySelectorAll('#repo-list tr');
-  const repoEls = [];
-  rows.forEach(row => {
-    const cells = row.querySelectorAll('td');
-    if (cells.length >= 3 && cells[0].style.fontFamily) {
-      const [owner, repo] = cells[0].textContent.trim().split('/');
-      if (owner && repo) repoEls.push({owner, repo, row});
-    }
-  });
-  if (repoEls.length === 0) return;
+function scanAll() {
+  var tds=document.querySelectorAll('#repo-list td:first-child'), items=[];
+  tds.forEach(function(t){var p=t.textContent.trim().split('/');if(p.length===2)items.push({o:p[0],r:p[1]});});
+  var stat=document.getElementById('status'), box=document.getElementById('results-body');
+  document.getElementById('scan-results').style.display='block';
+  var html='', ok=0, fail=0;
 
-  const statusEl = document.getElementById('status');
-  const body = document.getElementById('results-body');
-  const div = document.getElementById('scan-results');
-  div.style.display = 'block';
-  body.innerHTML = '';
-  let ok = 0, fail = 0;
-
-  for (let i = 0; i < repoEls.length; i++) {
-    const {owner, repo} = repoEls[i];
-    statusEl.textContent = 'Scanning ' + (i+1) + '/' + repoEls.length + ': ' + owner + '/' + repo + '...';
-    try {
-      const res = await api('POST', '/scan', {owner, repo});
-      const r = res.repo ? res : {repo: owner + '/' + repo, matches: 0, summary: {}};
-      const hasBlocks = (r.summary?.secrets || 0) + (r.summary?.sensitive_files || 0) + (r.summary?.merge_conflicts || 0);
-      const hasWarns = (r.summary?.debug_prints || 0) + (r.summary?.hardcoded_connections || 0);
-      const badge = hasBlocks > 0 ? '<span class="badge badge-danger">BLOCK</span>'
-                  : hasWarns > 0 ? '<span class="badge badge-warn">WARN</span>'
-                  : '<span class="badge badge-ok">CLEAN</span>';
-      const id = 'r' + i;
-      const details = (r.matches || []).slice(0, 50).map(m =>
-        '<div style="padding:4px 0 4px 16px;font-size:12px;color:#8b949e">' +
-        '<span style="color:#f85149">' + (m.severity === 'BLOCK' ? '🔴' : m.severity === 'WARN' ? '🟡' : '🔵') + '</span> ' +
-        '<code style="color:#58a6ff;font-size:11px">' + m.path + ':' + (m.lineNumber || '?') + '</code> ' +
-        '<span style="color:#e6edf3">' + m.pattern + '</span>' +
-        '<span style="color:#484f58;margin-left:8px">' + (m.line || '').slice(0, 80) + '</span>' +
-        '</div>'
-      ).join('');
-      const more = r.matches?.length > 50 ? '<div style="padding:4px 16px;font-size:12px;color:#8b949e">... and ' + (r.matches.length - 50) + ' more</div>' : '';
-      body.innerHTML +=
-        '<div class="result-item" onclick="var d=document.getElementById(\'' + id + '\');d.style.display=d.style.display===\'none\'?\'\':\'none\'" style="cursor:pointer">' +
-        badge + '<strong>' + r.repo + '</strong> — ' + (r.matches?.length || 0) + ' finding(s) ' +
-        '<span style="color:#484f58;font-size:11px">▸</span>' +
-        '</div>' +
-        '<div id="' + id + '" style="display:none;background:#0d1117;border-radius:0 0 6px 6px;margin:-1px 0 4px 0">' +
-        details + more +
-        '</div>';
-      ok++;
-    } catch(e) {
-      body.innerHTML += '<div class="result-item" style="color:#f85149">❌ <strong>' + owner + '/' + repo + '</strong> — failed</div>';
-      fail++;
-    }
-  }
-  statusEl.textContent = 'Done: ' + ok + ' scanned' + (fail > 0 ? ', ' + fail + ' failed' : '');
-}
-
-async function loadRepos() {
-  const owner = document.getElementById('repo-owner').value.trim();
-  if (!owner) return;
-  document.getElementById('load-status').textContent = 'Loading...';
-  const grid = document.getElementById('repo-picker');
-  grid.innerHTML = '';
-  try {
-    const repos = await api('GET', '/my-repos');
-    document.getElementById('load-status').textContent = repos.length + ' repos found';
-    repos.forEach(r => {
-      const key = r.owner + '/' + r.name;
-      const tracked = TRACKED.includes(key);
-      const div = document.createElement('div');
-      div.className = 'picker-item' + (tracked ? ' added' : '');
-      div.innerHTML = '<span>' + key + '</span><span class="add-icon">' + (tracked ? '✓' : '+') + '</span>';
-      if (!tracked) div.onclick = () => trackRepo(r.owner, r.name, div);
-      grid.appendChild(div);
-    });
-  } catch(e) {
-    document.getElementById('load-status').textContent = 'Error loading repos';
-  }
-}
-
-async function trackRepo(owner, repo, el) {
-  const res = await api('POST', '/tracked', { owner, repo });
-  if (res.error) { alert(res.error); return; }
-  el.classList.add('added');
-  el.querySelector('.add-icon').textContent = '✓';
-  el.onclick = null;
-}
-
-async function trackAll() {
-  const items = document.querySelectorAll('.picker-item:not(.added)');
-  if (items.length === 0) return;
-  document.getElementById('load-status').textContent = 'Adding ' + items.length + ' repos...';
-  let count = 0;
-  for (const el of items) {
-    const text = el.querySelector('span').textContent.split('/');
-    if (text.length === 2) {
-      const res = await api('POST', '/tracked', { owner: text[0], repo: text[1] });
-      if (!res.error) {
-        el.classList.add('added');
-        el.querySelector('.add-icon').textContent = '✓';
-        el.onclick = null;
-        count++;
+  function next(i) {
+    if(i>=items.length){stat.textContent='Done: '+ok+' scanned'+(fail?', '+fail+' failed':'');return;}
+    var it=items[i];
+    stat.textContent='Scanning '+(i+1)+'/'+items.length+': '+it.o+'/'+it.r+'...';
+    api('POST','/scan',{owner:it.o,repo:it.r}).then(function(res){
+      var r=res.repo?res:{repo:it.o+'/'+it.r,matches:[],summary:{}};
+      var bl=(r.summary.secrets||0)+(r.summary.sensitive_files||0)+(r.summary.merge_conflicts||0);
+      var wn=(r.summary.debug_prints||0)+(r.summary.hardcoded_connections||0);
+      var b=bl>0?'<span class="badge badge-danger">BLOCK</span>':wn>0?'<span class="badge badge-warn">WARN</span>':'<span class="badge badge-ok">CLEAN</span>';
+      var n=r.matches?r.matches.length:0;
+      html+='<div class="result-item" onclick="toggleDetails(this)" style="cursor:pointer">'+b+'<strong>'+r.repo+'</strong> \\u2014 '+n+' finding(s) <span style="color:#484f58;font-size:11px">\\u25b8</span></div>';
+      if(r.matches&&r.matches.length>0){
+        html+='<div class="match-details" style="display:none;background:#0d1117;border-radius:0 0 6px 6px;margin:-1px 0 4px 0">';
+        for(var j=0,mx=Math.min(r.matches.length,50);j<mx;j++){var m=r.matches[j],ic=m.severity==='BLOCK'?'\\ud83d\\udd34':m.severity==='WARN'?'\\ud83d\\udfe1':'\\ud83d\\udd35';
+          html+='<div style="padding:4px 0 4px 16px;font-size:12px;color:#8b949e">'+ic+' <code style="color:#58a6ff;font-size:11px">'+m.path+':'+(m.lineNumber||'?')+'</code> <span style="color:#e6edf3">'+m.pattern+'</span><span style="color:#484f58;margin-left:8px">'+(m.line||'').slice(0,80)+'</span></div>';}
+        if(r.matches.length>50)html+='<div style="padding:4px 16px;font-size:12px;color:#8b949e">... and '+(r.matches.length-50)+' more</div>';
+        html+='</div>';
       }
-    }
+      ok++;box.innerHTML=html;next(i+1);
+    }).catch(function(){html+='<div class="result-item" style="color:#f85149">\\u274c <strong>'+it.o+'/'+it.r+'</strong> \\u2014 failed</div>';fail++;box.innerHTML=html;next(i+1);});
   }
-  document.getElementById('load-status').textContent = count + ' added';
-  setTimeout(() => location.reload(), 800);
+  next(0);
+}
+
+function toggleDetails(el){var n=el.nextElementSibling;if(n&&n.className==='match-details')n.style.display=n.style.display==='none'?'':'none';}
+
+function loadRepos(){
+  var o=document.getElementById('repo-owner').value.trim();
+  if(!o)return;
+  var s=document.getElementById('load-status'),g=document.getElementById('repo-picker');
+  s.textContent='Loading...';g.innerHTML='';
+  api('GET','/my-repos').then(function(repos){
+    s.textContent=repos.length+' repos found';
+    repos.forEach(function(r){var k=r.owner+'/'+r.name,d=document.createElement('div');d.className='picker-item'+(trackedSet[k]?' added':'');d.innerHTML='<span>'+k+'</span><span class="add-icon">'+(trackedSet[k]?'\\u2713':'+')+'</span>';if(!trackedSet[k])d.onclick=function(){trackRepo(r.owner,r.name,d);};g.appendChild(d);});
+  }).catch(function(e){s.textContent='Error: '+(e.message||'failed');});
+}
+
+function trackRepo(owner,repo,el){api('POST','/tracked',{owner:owner,repo:repo}).then(function(){el.classList.add('added');el.querySelector('.add-icon').textContent='\\u2713';el.onclick=null;trackedSet[owner+'/'+repo]=1;}).catch(function(e){alert(e.message);});}
+
+function trackAll(){
+  var its=document.querySelectorAll('.picker-item:not(.added)');
+  if(!its.length)return;
+  var s=document.getElementById('load-status'),t=its.length,c=0;
+  var arr=[];its.forEach(function(el){var p=el.querySelector('span').textContent.split('/');if(p.length===2)arr.push({el:el,o:p[0],r:p[1]});});
+  s.textContent='Adding '+arr.length+' repos...';
+  function next(i){if(i>=arr.length){s.textContent=c+' added';setTimeout(function(){location.reload();},500);return;}var it=arr[i];s.textContent='Adding '+(i+1)+'/'+arr.length+': '+it.o+'/'+it.r+'...';api('POST','/tracked',{owner:it.o,repo:it.r}).then(function(){it.el.classList.add('added');it.el.querySelector('.add-icon').textContent='\\u2713';it.el.onclick=null;trackedSet[it.o+'/'+it.r]=1;c++;next(i+1);}).catch(function(){next(i+1);});}
+  next(0);
 }
 </script>
+
 </body></html>`);
 }
 
