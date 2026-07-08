@@ -81,12 +81,106 @@ echo ""
 install_hook "pre-commit"
 install_hook "pre-push"
 
-# ── Give them an example blocklist ────────────────────────────
-# Only if they don't already have one.  They should edit this
-# with their own patterns.
-if [ ! -f "$REPO_ROOT/.safepush-blocklist" ]; then
-    if curl -sSLf "$BASE_URL/.safepush-blocklist" -o "$REPO_ROOT/.safepush-blocklist" 2>/dev/null; then
-        echo "  ✓ .safepush-blocklist (example — edit with your patterns)"
+# ── Helper — escape a string for grep -E regex ─────────────────
+escape_regex() {
+    echo "$1" | sed -e 's/\./\\./g'  -e 's/\+/\\+/g'  -e 's/\*/\\*/g' \
+                   -e 's/\?/\\?/g'  -e 's/(/\\(/g'   -e 's/)/\\)/g' \
+                   -e 's/\[/\\[/g'  -e 's/\]/\\]/g'  -e 's/{/\\{/g' \
+                   -e 's/}/\\}/g'   -e 's/|/\\|/g'   -e 's/\^/\\^/g' \
+                   -e 's/\$/\\$/g'
+}
+
+# ── Interactive blocklist ──────────────────────────────────────
+setup_blocklist() {
+    local blocklist="$REPO_ROOT/.safepush-blocklist"
+    local header_written=false
+
+    # Seed the file with a header if it doesn't exist yet.
+    if [ ! -f "$blocklist" ]; then
+        {
+            echo "# .safepush-blocklist — patterns that will BLOCK the commit"
+            echo "# This file lives on your machine. It is never sent anywhere."
+            echo "# Edit anytime to add or remove patterns."
+            echo ""
+        } > "$blocklist"
+        header_written=true
+    fi
+
+    echo ""
+    echo "  ── Personal blocklist ──"
+    echo ""
+    echo "  The blocklist catches sensitive info BEFORE it leaves"
+    echo "  your machine.  Any file that matches a pattern here"
+    echo "  will be BLOCKED from being committed."
+    echo ""
+    echo "  This file (.safepush-blocklist) stays local."
+    echo "  Nothing is uploaded or shared."
+    echo ""
+
+    # -- Email(s) --
+    echo -n "  Your email(s)  [comma-separated, or enter to skip]: "
+    read -r raw_emails || true
+    raw_emails=$(echo "$raw_emails" | xargs)
+    if [ -n "$raw_emails" ]; then
+        echo "# Emails" >> "$blocklist"
+        IFS=',' read -ra EMAILS <<< "$raw_emails"
+        for email in "${EMAILS[@]}"; do
+            email=$(echo "$email" | xargs)
+            [ -z "$email" ] && continue
+            escaped=$(escape_regex "$email")
+            echo "$escaped" >> "$blocklist"
+            echo "    ✓ $email"
+        done
+    fi
+
+    # -- Phone number(s) --
+    echo -n "  Your phone(s)  [comma-separated, or enter to skip]: "
+    read -r raw_phones || true
+    raw_phones=$(echo "$raw_phones" | xargs)
+    if [ -n "$raw_phones" ]; then
+        echo "# Phone numbers" >> "$blocklist"
+        IFS=',' read -ra PHONES <<< "$raw_phones"
+        for phone in "${PHONES[@]}"; do
+            phone=$(echo "$phone" | xargs)
+            [ -z "$phone" ] && continue
+            escaped=$(escape_regex "$phone")
+            echo "$escaped" >> "$blocklist"
+            echo "    ✓ $phone"
+        done
+    fi
+
+    # -- Custom patterns (free-form, one per line) --
+    echo ""
+    echo "  Add any other patterns (one per line, blank to finish):"
+    echo "# Custom patterns" >> "$blocklist"
+    local n=1
+    while true; do
+        echo -n "    $n: "
+        read -r pattern || break
+        pattern=$(echo "$pattern" | xargs)
+        if [ -z "$pattern" ]; then
+            break
+        fi
+        echo "$pattern" >> "$blocklist"
+        echo "    ✓ added"
+        n=$((n + 1))
+    done
+
+    echo ""
+    echo "  ✓ .safepush-blocklist saved"
+}
+
+# Only run interactively when stdin is a terminal.
+# In CI or pipe mode, skip and let the user edit manually.
+if [ -t 0 ]; then
+    setup_blocklist
+else
+    # Fall back: download the example blocklist.
+    if [ ! -f "$REPO_ROOT/.safepush-blocklist" ]; then
+        if curl -sSLf "$BASE_URL/.safepush-blocklist" -o "$REPO_ROOT/.safepush-blocklist" 2>/dev/null; then
+            echo ""
+            echo "  ✓ .safepush-blocklist (example — edit with your patterns)"
+        fi
     fi
 fi
 
@@ -94,6 +188,5 @@ fi
 echo ""
 echo "  Done — $installed hook(s) installed."
 echo ""
-echo "  Next: edit .safepush-blocklist with your personal patterns"
-echo "        (emails, phone numbers, project names you never want to leak)"
+echo "  Review .safepush-blocklist anytime to add or remove patterns."
 echo ""
