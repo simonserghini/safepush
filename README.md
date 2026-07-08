@@ -67,13 +67,4 @@ internal\.company\.com
 
 Lines starting with `#` are comments.  Uses `grep -E` regex.
 
-## Interactive mode
-
-All checks are interactive when run in a terminal — they ask `[y/N]` before blocking.
-In CI or scripts (non-TTY), all checks pass through without blocking.
-
-## Language support
-
-Debug-prints check covers: JavaScript/TS, Rust, Python, Go, Java, C#, Ruby, Kotlin, PHP, C/C++, Bash.
-
 https://safepush.serghini.me/
