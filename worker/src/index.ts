@@ -74,7 +74,8 @@ async function extractToken(request: Request, env: Env): Promise<string | undefi
   if (headerToken) return headerToken;
 
   // 3. Session cookie / header
-  const sessionId = request.headers.get("x-safepush-session");
+  const sessionId = getSessionCookie(request)
+    || request.headers.get("x-safepush-session");
   if (sessionId) {
     const stored = await env.SESSIONS.get(`session:${sessionId}`);
     if (stored) return stored;
@@ -92,6 +93,18 @@ async function extractToken(request: Request, env: Env): Promise<string | undefi
   if (queryToken) return queryToken;
 
   return undefined;
+}
+
+// ── Logout ─────────────────────────────────────────────────
+
+function handleLogout(): Response {
+  return new Response(null, {
+    status: 302,
+    headers: {
+      "Location": "/",
+      "Set-Cookie": "safepush_session=; Path=/; HttpOnly; Secure; SameSite=Lax; Max-Age=0",
+    },
+  });
 }
 
 // ── OAuth ──────────────────────────────────────────────────
@@ -140,26 +153,14 @@ async function handleCallback(request: Request, env: Env): Promise<Response> {
   await env.SESSIONS.put(`session:${sessionId}`, token, { expirationTtl: 86400 });
   await env.SESSIONS.put(`user:${sessionId}`, username, { expirationTtl: 86400 });
 
-  // Return HTML page that stores the session and redirects
-  return html(`<!DOCTYPE html>
-<html>
-<head><title>safepush — logged in</title>
-<style>
-  body { background:#0d1117; color:#e6edf3; font-family:system-ui; display:flex; align-items:center; justify-content:center; min-height:100vh; margin:0; }
-  .card { background:#161b22; border:1px solid #30363d; border-radius:12px; padding:48px; text-align:center; }
-  h1 { color:#3fb950; }
-  code { background:#0d1117; padding:4px 10px; border-radius:4px; font-size:14px; color:#58a6ff; }
-</style></head>
-<body>
-<div class="card">
-  <h1>✓ Logged in as ${username}</h1>
-  <p>Your session token:</p>
-  <code>${sessionId}</code>
-  <p style="margin-top:16px;color:#8b949e">Use this in your requests:</p>
-  <code>curl -H 'x-safepush-session: ${sessionId}' https://${url.host}/scan -d '{"owner":"...","repo":"..."}'</code>
-  <p style="margin-top:24px"><a href="/" style="color:#58a6ff">← back home</a></p>
-</div>
-</body></html>`);
+  // Set session cookie and redirect to dashboard
+  return new Response(null, {
+    status: 302,
+    headers: {
+      "Location": "/",
+      "Set-Cookie": `safepush_session=${sessionId}; Path=/; HttpOnly; Secure; SameSite=Lax; Max-Age=86400`,
+    },
+  });
 }
 
 async function handleAuthStatus(request: Request, env: Env): Promise<Response> {
@@ -434,6 +435,362 @@ async function handleDashboard(owner: string, env: Env): Promise<Response> {
   return json(JSON.parse(data));
 }
 
+// ── Tracked repos ─────────────────────────────────────────
+
+interface TrackedRepo { owner: string; repo: string; addedAt: string; }
+
+async function getTrackedRepos(sessionId: string, env: Env): Promise<TrackedRepo[]> {
+  const raw = await env.SCANS.get(`tracked:${sessionId}`);
+  return raw ? JSON.parse(raw) : [];
+}
+
+async function saveTrackedRepos(sessionId: string, repos: TrackedRepo[], env: Env): Promise<void> {
+  await env.SCANS.put(`tracked:${sessionId}`, JSON.stringify(repos));
+}
+
+async function handleTrackedList(request: Request, env: Env): Promise<Response> {
+  const sessionId = request.headers.get("x-safepush-session")
+    || new URL(request.url).searchParams.get("session");
+  if (!sessionId) return json({ error: "session required" }, 401);
+  const repos = await getTrackedRepos(sessionId, env);
+  return json(repos);
+}
+
+async function handleTrackedAdd(request: Request, env: Env): Promise<Response> {
+  const sessionId = request.headers.get("x-safepush-session")
+    || new URL(request.url).searchParams.get("session");
+  if (!sessionId) return json({ error: "session required" }, 401);
+
+  let body: any;
+  try { body = await request.json(); } catch { return json({ error: "invalid JSON" }, 400); }
+  const { owner, repo } = body;
+  if (!owner || !repo) return json({ error: "owner and repo required" }, 400);
+
+  const repos = await getTrackedRepos(sessionId, env);
+  if (repos.some(r => r.owner === owner && r.repo === repo)) {
+    return json({ error: "already tracked" }, 409);
+  }
+  repos.push({ owner, repo, addedAt: new Date().toISOString() });
+  await saveTrackedRepos(sessionId, repos, env);
+  return json({ tracked: repos.length, repos });
+}
+
+async function handleTrackedRemove(owner: string, repo: string, request: Request, env: Env): Promise<Response> {
+  const sessionId = request.headers.get("x-safepush-session")
+    || new URL(request.url).searchParams.get("session");
+  if (!sessionId) return json({ error: "session required" }, 401);
+
+  let repos = await getTrackedRepos(sessionId, env);
+  repos = repos.filter(r => !(r.owner === owner && r.repo === repo));
+  await saveTrackedRepos(sessionId, repos, env);
+  return json({ tracked: repos.length, repos });
+}
+
+async function handleTrackedScan(request: Request, env: Env): Promise<Response> {
+  const sessionId = request.headers.get("x-safepush-session")
+    || new URL(request.url).searchParams.get("session");
+  if (!sessionId) return json({ error: "session required" }, 401);
+
+  const token = await env.SESSIONS.get(`session:${sessionId}`);
+  if (!token) return json({ error: "invalid session" }, 401);
+
+  const repos = await getTrackedRepos(sessionId, env);
+  const results: any[] = [];
+  const errors: string[] = [];
+
+  for (const r of repos) {
+    try {
+      const result = await scanRepo(r.owner, r.repo, token);
+      await env.SCANS.put(`scan:${r.owner}:${r.repo}`, JSON.stringify(result), { expirationTtl: 86400 * 7 });
+      results.push({ repo: `${r.owner}/${r.repo}`, matches: result.matches.length, summary: result.summary });
+    } catch (e: any) {
+      errors.push(`${r.owner}/${r.repo}: ${e.message}`);
+    }
+  }
+
+  return json({ scanned: results.length, errors: errors.length, results, errorList: errors.slice(0, 20) });
+}
+
+// ── My repos (for picker) ──────────────────────────────────
+
+async function handleMyRepos(request: Request, env: Env): Promise<Response> {
+  const sessionId = getSessionCookie(request)
+    || request.headers.get("x-safepush-session");
+  if (!sessionId) return json({ error: "session required" }, 401);
+
+  const token = await env.SESSIONS.get(`session:${sessionId}`);
+  if (!token) return json({ error: "invalid session" }, 401);
+
+  const username = await env.SESSIONS.get(`user:${sessionId}`);
+  if (!username) return json({ error: "user not found" }, 401);
+
+  const repos = await listUserRepos(username, token);
+  return json(repos);
+}
+
+// ── Dashboard UI ───────────────────────────────────────────
+
+function getSessionCookie(request: Request): string {
+  const cookie = request.headers.get("cookie") || "";
+  const match = cookie.match(/safepush_session=([^;]+)/);
+  return match ? match[1] : "";
+}
+
+async function handleDashboardUI(request: Request, env: Env): Promise<Response> {
+  const sessionId = getSessionCookie(request)
+    || new URL(request.url).searchParams.get("session")
+    || request.headers.get("x-safepush-session") || "";
+
+  const token = sessionId ? await env.SESSIONS.get(`session:${sessionId}`) : null;
+  const username = token ? await env.SESSIONS.get(`user:${sessionId}`) : null;
+  const repos = sessionId ? await getTrackedRepos(sessionId, env) : [];
+
+  const repoRows = repos.length === 0
+    ? `<tr><td colspan="4" style="color:#8b949e;text-align:center;padding:32px">No repos tracked yet. Add one below or load your repos.</td></tr>`
+    : repos.map(r => `
+      <tr>
+        <td style="font-family:monospace">${r.owner}/${r.repo}</td>
+        <td style="color:#8b949e;font-size:12px">${r.addedAt.slice(0,10)}</td>
+        <td><a href="/scan/${r.owner}/${r.repo}" style="color:#58a6ff">view</a></td>
+        <td><button onclick="removeRepo('${r.owner}','${r.repo}')" style="background:none;border:none;color:#f85149;cursor:pointer;font-size:16px">&times;</button></td>
+      </tr>`).join("");
+
+  return html(`<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>safepush — dashboard</title>
+<style>
+  * { box-sizing:border-box; margin:0; padding:0; }
+  body { background:#0d1117; color:#e6edf3; font-family:system-ui; min-height:100vh; }
+  .nav { background:#161b22; border-bottom:1px solid #30363d; padding:12px 24px; display:flex; align-items:center; justify-content:space-between; }
+  .nav h2 { color:#3fb950; font-size:16px; }
+  .nav-right { display:flex; align-items:center; gap:16px; }
+  .nav .user { color:#8b949e; font-size:14px; }
+  .nav a { color:#58a6ff; text-decoration:none; font-size:14px; }
+  .nav a:hover { text-decoration:underline; }
+  .container { max-width:900px; margin:0 auto; padding:32px 24px; }
+  h1 { font-size:24px; margin-bottom:8px; }
+  .add-form { background:#161b22; border:1px solid #30363d; border-radius:8px; padding:20px; margin-bottom:24px; display:flex; gap:12px; flex-wrap:wrap; align-items:flex-end; }
+  .add-form input { background:#0d1117; border:1px solid #30363d; color:#e6edf3; padding:10px 14px; border-radius:6px; font-size:14px; }
+  .add-form input:focus { outline:none; border-color:#58a6ff; }
+  .btn { padding:10px 20px; border-radius:6px; font-weight:600; font-size:14px; cursor:pointer; border:none; transition:background .15s; }
+  .btn-green { background:#3fb950; color:#000; }
+  .btn-green:hover { background:#2ea043; }
+  .btn-blue { background:#1f6feb; color:#fff; }
+  .btn-blue:hover { background:#1158c7; }
+  .btn-outline { background:transparent; border:1px solid #30363d; color:#e6edf3; }
+  .btn-outline:hover { background:#21262d; }
+  table { width:100%; border-collapse:collapse; }
+  th { text-align:left; padding:10px 14px; color:#8b949e; font-size:12px; text-transform:uppercase; border-bottom:1px solid #30363d; }
+  td { padding:10px 14px; border-bottom:1px solid #21262d; font-size:14px; }
+  .scan-results { margin-top:24px; background:#161b22; border:1px solid #30363d; border-radius:8px; padding:20px; display:none; }
+  .scan-results h3 { color:#3fb950; margin-bottom:12px; }
+  .result-item { padding:8px 0; border-bottom:1px solid #21262d; font-size:13px; }
+  .result-item:last-child { border-bottom:none; }
+  .badge { display:inline-block; padding:2px 8px; border-radius:4px; font-size:11px; font-weight:700; margin-right:6px; }
+  .badge-danger { background:rgba(248,81,73,0.2); color:#f85149; }
+  .badge-warn { background:rgba(210,153,34,0.2); color:#d29922; }
+  .badge-ok { background:rgba(63,185,80,0.2); color:#3fb950; }
+  #status { margin-left:12px; font-size:13px; color:#8b949e; }
+  .picker-grid { display:grid; grid-template-columns:repeat(auto-fill,minmax(240px,1fr)); gap:8px; margin-bottom:24px; }
+  .picker-item { background:#161b22; border:1px solid #30363d; border-radius:6px; padding:10px 14px; cursor:pointer; font-size:13px; font-family:monospace; display:flex; justify-content:space-between; align-items:center; transition:border-color .15s; }
+  .picker-item:hover { border-color:#58a6ff; }
+  .picker-item .add-icon { color:#3fb950; font-weight:bold; font-size:18px; display:none; }
+  .picker-item:hover .add-icon { display:inline; }
+  .picker-item.added { border-color:#3fb950; opacity:0.5; cursor:default; }
+  .picker-item.added .add-icon { display:inline; color:#3fb950; }
+  .section-title { font-size:14px; color:#8b949e; text-transform:uppercase; letter-spacing:0.05em; margin-bottom:12px; display:flex; align-items:center; gap:12px; }
+  .section-title .count { color:#58a6ff; }
+</style>
+</head>
+<body>
+<div class="nav">
+  <h2>🔐 safepush</h2>
+  <div class="nav-right">
+    <span class="user">${username ? `👤 ${username}` : 'not logged in'}</span>
+    ${sessionId ? '<a href="/logout">Logout</a>' : '<a href="/login">Login</a>'}
+  </div>
+</div>
+<div class="container">
+  ${!sessionId ? `<div style="text-align:center;padding:80px 0">
+    <h1>safepush</h1>
+    <p style="color:#8b949e;margin:16px 0 32px">Track and scan your GitHub repos for secrets, debug prints, and more.</p>
+    <a href="/login" class="btn btn-green" style="display:inline-block;text-decoration:none;font-size:16px;padding:14px 36px">🔑 Login with GitHub</a>
+  </div>` : `
+  <h1>📋 Tracked Repos</h1>
+
+  <div class="section-title" style="margin-top:24px"><span>🔍 Load your repos</span></div>
+  <div style="display:flex;gap:12px;margin-bottom:16px;flex-wrap:wrap;align-items:center">
+    <input id="repo-owner" placeholder="GitHub username or org" value="${username}" style="background:#0d1117;border:1px solid #30363d;color:#e6edf3;padding:10px 14px;border-radius:6px;font-size:14px;width:240px">
+    <button class="btn btn-outline" onclick="loadRepos()">Load Repos</button>
+    <button class="btn btn-blue" onclick="trackAll()">+ Track All</button>
+    <span id="load-status" style="font-size:13px;color:#8b949e"></span>
+  </div>
+  <div class="picker-grid" id="repo-picker"></div>
+
+  <div class="section-title"><span>📌 Tracked (${repos.length})</span></div>
+  <div class="add-form">
+    <input id="owner" placeholder="owner" value="${username}" style="flex:1;min-width:140px">
+    <input id="repo" placeholder="repo name" style="flex:1;min-width:140px">
+    <button class="btn btn-green" onclick="addRepo()">+ Add</button>
+  </div>
+
+  <table>
+    <thead><tr><th>Repository</th><th>Added</th><th>Results</th><th></th></tr></thead>
+    <tbody id="repo-list">${repoRows}</tbody>
+  </table>
+
+  <div style="margin-top:24px;display:flex;align-items:center;gap:12px">
+    <button class="btn btn-blue" onclick="scanAll()">🔍 Scan All Tracked</button>
+    <span id="status"></span>
+  </div>
+
+  <div class="scan-results" id="scan-results">
+    <h3>Scan Results</h3>
+    <div id="results-body"></div>
+  </div>`}
+</div>
+
+<script>
+const SESSION = "${sessionId}";
+const BASE = "${env.BASE_URL || `https://${new URL(request.url).host}`}";
+const TRACKED = ${JSON.stringify(repos.map(r => r.owner + '/' + r.repo))};
+
+async function api(method, path, body) {
+  const opts = { method, headers: { 'content-type': 'application/json', 'x-safepush-session': SESSION } };
+  if (body) opts.body = JSON.stringify(body);
+  const r = await fetch(BASE + path, opts);
+  return r.json();
+}
+
+async function addRepo() {
+  const owner = document.getElementById('owner').value.trim();
+  const repo = document.getElementById('repo').value.trim();
+  if (!owner || !repo) return alert('Fill both fields');
+  const res = await api('POST', '/tracked', { owner, repo });
+  if (res.error) return alert(res.error);
+  location.reload();
+}
+
+async function removeRepo(owner, repo) {
+  await api('DELETE', '/tracked/' + owner + '/' + repo);
+  location.reload();
+}
+
+async function scanAll() {
+  const rows = document.querySelectorAll('#repo-list tr');
+  const repoEls = [];
+  rows.forEach(row => {
+    const cells = row.querySelectorAll('td');
+    if (cells.length >= 3 && cells[0].style.fontFamily) {
+      const [owner, repo] = cells[0].textContent.trim().split('/');
+      if (owner && repo) repoEls.push({owner, repo, row});
+    }
+  });
+  if (repoEls.length === 0) return;
+
+  const statusEl = document.getElementById('status');
+  const body = document.getElementById('results-body');
+  const div = document.getElementById('scan-results');
+  div.style.display = 'block';
+  body.innerHTML = '';
+  let ok = 0, fail = 0;
+
+  for (let i = 0; i < repoEls.length; i++) {
+    const {owner, repo} = repoEls[i];
+    statusEl.textContent = 'Scanning ' + (i+1) + '/' + repoEls.length + ': ' + owner + '/' + repo + '...';
+    try {
+      const res = await api('POST', '/scan', {owner, repo});
+      const r = res.repo ? res : {repo: owner + '/' + repo, matches: 0, summary: {}};
+      const hasBlocks = (r.summary?.secrets || 0) + (r.summary?.sensitive_files || 0) + (r.summary?.merge_conflicts || 0);
+      const hasWarns = (r.summary?.debug_prints || 0) + (r.summary?.hardcoded_connections || 0);
+      const badge = hasBlocks > 0 ? '<span class="badge badge-danger">BLOCK</span>'
+                  : hasWarns > 0 ? '<span class="badge badge-warn">WARN</span>'
+                  : '<span class="badge badge-ok">CLEAN</span>';
+      const id = 'r' + i;
+      const details = (r.matches || []).slice(0, 50).map(m =>
+        '<div style="padding:4px 0 4px 16px;font-size:12px;color:#8b949e">' +
+        '<span style="color:#f85149">' + (m.severity === 'BLOCK' ? '🔴' : m.severity === 'WARN' ? '🟡' : '🔵') + '</span> ' +
+        '<code style="color:#58a6ff;font-size:11px">' + m.path + ':' + (m.lineNumber || '?') + '</code> ' +
+        '<span style="color:#e6edf3">' + m.pattern + '</span>' +
+        '<span style="color:#484f58;margin-left:8px">' + (m.line || '').slice(0, 80) + '</span>' +
+        '</div>'
+      ).join('');
+      const more = r.matches?.length > 50 ? '<div style="padding:4px 16px;font-size:12px;color:#8b949e">... and ' + (r.matches.length - 50) + ' more</div>' : '';
+      body.innerHTML +=
+        '<div class="result-item" onclick="var d=document.getElementById(\'' + id + '\');d.style.display=d.style.display===\'none\'?\'\':\'none\'" style="cursor:pointer">' +
+        badge + '<strong>' + r.repo + '</strong> — ' + (r.matches?.length || 0) + ' finding(s) ' +
+        '<span style="color:#484f58;font-size:11px">▸</span>' +
+        '</div>' +
+        '<div id="' + id + '" style="display:none;background:#0d1117;border-radius:0 0 6px 6px;margin:-1px 0 4px 0">' +
+        details + more +
+        '</div>';
+      ok++;
+    } catch(e) {
+      body.innerHTML += '<div class="result-item" style="color:#f85149">❌ <strong>' + owner + '/' + repo + '</strong> — failed</div>';
+      fail++;
+    }
+  }
+  statusEl.textContent = 'Done: ' + ok + ' scanned' + (fail > 0 ? ', ' + fail + ' failed' : '');
+}
+
+async function loadRepos() {
+  const owner = document.getElementById('repo-owner').value.trim();
+  if (!owner) return;
+  document.getElementById('load-status').textContent = 'Loading...';
+  const grid = document.getElementById('repo-picker');
+  grid.innerHTML = '';
+  try {
+    const repos = await api('GET', '/my-repos');
+    document.getElementById('load-status').textContent = repos.length + ' repos found';
+    repos.forEach(r => {
+      const key = r.owner + '/' + r.name;
+      const tracked = TRACKED.includes(key);
+      const div = document.createElement('div');
+      div.className = 'picker-item' + (tracked ? ' added' : '');
+      div.innerHTML = '<span>' + key + '</span><span class="add-icon">' + (tracked ? '✓' : '+') + '</span>';
+      if (!tracked) div.onclick = () => trackRepo(r.owner, r.name, div);
+      grid.appendChild(div);
+    });
+  } catch(e) {
+    document.getElementById('load-status').textContent = 'Error loading repos';
+  }
+}
+
+async function trackRepo(owner, repo, el) {
+  const res = await api('POST', '/tracked', { owner, repo });
+  if (res.error) { alert(res.error); return; }
+  el.classList.add('added');
+  el.querySelector('.add-icon').textContent = '✓';
+  el.onclick = null;
+}
+
+async function trackAll() {
+  const items = document.querySelectorAll('.picker-item:not(.added)');
+  if (items.length === 0) return;
+  document.getElementById('load-status').textContent = 'Adding ' + items.length + ' repos...';
+  let count = 0;
+  for (const el of items) {
+    const text = el.querySelector('span').textContent.split('/');
+    if (text.length === 2) {
+      const res = await api('POST', '/tracked', { owner: text[0], repo: text[1] });
+      if (!res.error) {
+        el.classList.add('added');
+        el.querySelector('.add-icon').textContent = '✓';
+        el.onclick = null;
+        count++;
+      }
+    }
+  }
+  document.getElementById('load-status').textContent = count + ' added';
+  setTimeout(() => location.reload(), 800);
+}
+</script>
+</body></html>`);
+}
+
 // ── Landing page ──────────────────────────────────────────
 
 async function handleLanding(env: Env): Promise<Response> {
@@ -515,6 +872,7 @@ export default {
       // Auth
       if (method === "GET" && path === "/login")         return handleLogin(request, env);
       if (method === "GET" && path === "/callback")      return handleCallback(request, env);
+      if (method === "GET" && path === "/logout")        return handleLogout();
       if (method === "GET" && path === "/auth/status")   return handleAuthStatus(request, env);
 
       // Scanning
@@ -533,8 +891,16 @@ export default {
       const dashMatch = path.match(/^\/dashboard\/([^/]+)$/);
       if (method === "GET" && dashMatch) { const r = await handleDashboard(dashMatch[1], env); Object.entries(c).forEach(([k,v]) => r.headers.set(k,v)); return r; }
 
-      // Landing
-      if (method === "GET" && path === "/") return handleLanding(env);
+      // Tracked repos
+      if (method === "GET"  && path === "/tracked")            { const r = await handleTrackedList(request, env); Object.entries(c).forEach(([k,v]) => r.headers.set(k,v)); return r; }
+      if (method === "POST" && path === "/tracked")            { const r = await handleTrackedAdd(request, env); Object.entries(c).forEach(([k,v]) => r.headers.set(k,v)); return r; }
+      if (method === "GET"  && path === "/tracked/scan")       { const r = await handleTrackedScan(request, env); Object.entries(c).forEach(([k,v]) => r.headers.set(k,v)); return r; }
+      if (method === "GET"  && path === "/my-repos")           { const r = await handleMyRepos(request, env); Object.entries(c).forEach(([k,v]) => r.headers.set(k,v)); return r; }
+      const trackedRemoveMatch = path.match(/^\/tracked\/([^/]+)\/([^/]+)$/);
+      if (method === "DELETE" && trackedRemoveMatch) { const r = await handleTrackedRemove(trackedRemoveMatch[1], trackedRemoveMatch[2], request, env); Object.entries(c).forEach(([k,v]) => r.headers.set(k,v)); return r; }
+
+      // Dashboard UI (also at /app for backwards compat)
+      if (method === "GET" && (path === "/" || path === "/app")) return handleDashboardUI(request, env);
 
       return json({ error: "not found" }, 404);
     } catch (e: any) {

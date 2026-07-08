@@ -4,21 +4,13 @@ compatibility_date = "2026-07-08"
 
 [[kv_namespaces]]
 binding = "SCANS"
-id = "SAFEPUSH_SCANS_KV"
-preview_id = "SAFEPUSH_SCANS_KV_PREVIEW"
+id = "aeb8748200254e1289f426cee7149cee"
 
 [[kv_namespaces]]
 binding = "SESSIONS"
-id = "SAFEPUSH_SESSIONS_KV"
+id = "785e951f3d4e41c7933f9cea6a430518"
 
 [env.production]
-[[kv_namespaces]]
-binding = "SCANS"
-id = "SAFEPUSH_SCANS_KV"
-
-[[kv_namespaces]]
-binding = "SESSIONS"
-id = "SAFEPUSH_SESSIONS_KV"
 
 [vars]
 DASHBOARD_TITLE = "safepush — cloud scanner"
