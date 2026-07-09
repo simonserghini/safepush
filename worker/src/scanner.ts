@@ -269,7 +269,9 @@ export function scanFile(path: string, content: string, options?: ScanOptions): 
         if (isDeclaration(line)) continue;
         // Skip false positives: placeholder/default values
         const val = line.toLowerCase();
-        if (/\b(your_?|example_?|test_?|sample_?|dummy_?|changeme|replaceme|xxxx+|abcde+|12345+|password_?here)\b/i.test(val)) continue;
+        if (/\b(your_?|example_?|test_?|sample_?|dummy_?|changeme|replaceme|xxxx+|abcde+|12345+|password[_-]?here)/i.test(val)) continue;
+        // Skip compound camelCase identifiers: formFieldInputShowPasswordButton, setApiKey, etc.
+        if (/[a-z][A-Z](?:.*(?:password|secret|token|api[_-]?key))|(?:password|secret|token|api[_-]?key).*[A-Z][a-z]/i.test(line)) continue;
         // Skip if the assigned value is an env var or variable reference
         const match = line.match(regex);
         if (match && match[1] && isVariableReference(match[1])) continue;

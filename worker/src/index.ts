@@ -569,6 +569,145 @@ async function handleTrackedScan(request: Request, env: Env): Promise<Response> 
   return json({ scanned: results.length, errors: errors.length, results, errorList: errors.slice(0, 20) });
 }
 
+// ── Quick scan result page ─────────────────────────────────
+
+async function handleQuickScanResult(owner: string, repo: string, env: Env): Promise<Response> {
+  let result: ScanResult;
+  try {
+    result = await scanRepo(owner, repo);
+    await env.SCANS.put(`scan:${owner}:${repo}`, JSON.stringify(result), { expirationTtl: 86400 * 7 });
+  } catch (e: any) {
+    return html(`<!DOCTYPE html><html><head><meta charset="UTF-8"><title>safepush — error</title>
+<style>body{background:#0d1117;color:#e6edf3;font-family:system-ui;display:flex;align-items:center;justify-content:center;min-height:100vh;margin:0}
+.card{background:#161b22;border:1px solid #30363d;border-radius:12px;padding:48px;text-align:center}
+h1{color:#f85149}a{color:#58a6ff}</style></head><body>
+<div class="card"><h1>❌ Scan failed</h1><p style="color:#8b949e">${owner}/${repo}: ${e.message}</p><p style="margin-top:16px"><a href="/">← back</a></p></div></body></html>`, 500);
+  }
+
+  const badge = (result.summary.secrets || 0) + (result.summary.sensitive_files || 0) + (result.summary.merge_conflicts || 0) > 0
+    ? '<span style="color:#f85149;font-weight:700">🔴 BLOCK</span>'
+    : (result.summary.debug_prints || 0) + (result.summary.hardcoded_connections || 0) > 0
+    ? '<span style="color:#d29922;font-weight:700">🟡 WARN</span>'
+    : '<span style="color:#3fb950;font-weight:700">✅ CLEAN</span>';
+
+  const findings = result.matches.length === 0
+    ? '<p style="color:#3fb950">No issues found. 🎉</p>'
+    : result.matches.slice(0, 100).map(m => {
+        const icon = m.severity === "BLOCK" ? "🔴" : m.severity === "WARN" ? "🟡" : "🔵";
+        return `<div style="padding:6px 12px;font-size:12px;color:#8b949e;border-bottom:1px solid #21262d">${icon} <code style="color:#58a6ff;font-size:11px">${m.path}:${m.lineNumber || "?"}</code> <span style="color:#e6edf3">${m.pattern}</span><span style="color:#484f58;margin-left:8px">${(m.line || "").slice(0, 100)}</span></div>`;
+      }).join("")
+    + (result.matches.length > 100 ? `<div style="padding:6px 12px;font-size:12px;color:#8b949e">... and ${result.matches.length - 100} more</div>` : "");
+
+  return html(`<!DOCTYPE html><html lang="en"><head>
+<meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1.0">
+<title>safepush — ${owner}/${repo}</title>
+<style>
+*{box-sizing:border-box;margin:0;padding:0}
+body{background:#0d1117;color:#e6edf3;font-family:system-ui;min-height:100vh}
+.nav{background:#161b22;border-bottom:1px solid #30363d;padding:12px 24px;display:flex;align-items:center;justify-content:space-between}
+.nav h2{color:#3fb950;font-size:16px}.nav a{color:#58a6ff;text-decoration:none;font-size:14px}
+.container{max-width:960px;margin:0 auto;padding:32px 24px}
+h1{font-size:24px;margin-bottom:8px}
+.stats{display:flex;gap:16px;margin:16px 0;flex-wrap:wrap}
+.stat{background:#161b22;border:1px solid #30363d;border-radius:8px;padding:16px 24px;text-align:center;min-width:100px}
+.stat .num{font-size:28px;font-weight:800}.stat .label{font-size:11px;color:#8b949e;text-transform:uppercase;margin-top:4px}
+.stat.red .num{color:#f85149}.stat.yellow .num{color:#d29922}.stat.blue .num{color:#58a6ff}.stat.green .num{color:#3fb950}
+.findings{background:#161b22;border:1px solid #30363d;border-radius:8px;overflow:hidden;margin-top:16px}
+</style></head><body>
+<div class="nav"><h2>🔐 safepush</h2><a href="/">← back</a></div>
+<div class="container">
+<h1>${owner}/${repo}</h1>
+<p style="color:#8b949e;margin-bottom:16px">Scanned ${result.totalFiles} files — ${badge}</p>
+<div class="stats">
+<div class="stat red"><div class="num">${result.summary.secrets || 0}</div><div class="label">Secrets</div></div>
+<div class="stat red"><div class="num">${result.summary.sensitive_files || 0}</div><div class="label">Sensitive Files</div></div>
+<div class="stat red"><div class="num">${result.summary.merge_conflicts || 0}</div><div class="label">Merge Conflicts</div></div>
+<div class="stat yellow"><div class="num">${result.summary.debug_prints || 0}</div><div class="label">Debug Prints</div></div>
+<div class="stat yellow"><div class="num">${result.summary.hardcoded_connections || 0}</div><div class="label">Connections</div></div>
+<div class="stat blue"><div class="num">${result.summary.absolute_paths || 0}</div><div class="label">Abs Paths</div></div>
+<div class="stat blue"><div class="num">${result.summary.todo_fixme || 0}</div><div class="label">TODO/FIXME</div></div>
+</div>
+<div class="findings">${findings}</div>
+</div></body></html>`);
+}
+
+// ── Profile page (quick scan for any GitHub user) ──────────
+
+async function handleProfilePage(username: string, env: Env): Promise<Response> {
+  let repos: Array<{ name: string; owner: string }> = [];
+  let error = "";
+  try {
+    repos = await listUserRepos(username);
+  } catch (e: any) {
+    error = e.message || "Failed to fetch repos";
+  }
+
+  const repoList = repos.length === 0
+    ? `<p style="color:#8b949e">${error || "No public repos found for " + username}</p>`
+    : repos.map(r => `
+      <div class="picker-item" onclick="scanRepo('${r.owner}','${r.name}')" style="cursor:pointer">
+        <span>${r.owner}/${r.name}</span><span class="add-icon" style="display:inline">+</span>
+      </div>`).join("");
+
+  return html(`<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1.0">
+<title>safepush — ${username}</title>
+<style>
+  *{box-sizing:border-box;margin:0;padding:0}
+  body{background:#0d1117;color:#e6edf3;font-family:system-ui;min-height:100vh}
+  .nav{background:#161b22;border-bottom:1px solid #30363d;padding:12px 24px;display:flex;align-items:center;justify-content:space-between}
+  .nav h2{color:#3fb950;font-size:16px}.nav a{color:#58a6ff;text-decoration:none;font-size:14px}
+  .container{max-width:900px;margin:0 auto;padding:32px 24px}
+  h1{font-size:24px;margin-bottom:8px}.btn{padding:10px 20px;border-radius:6px;font-weight:600;font-size:14px;cursor:pointer;border:none}
+  .btn-blue{background:#1f6feb;color:#fff}.btn-blue:hover{background:#1158c7}
+  .picker-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(240px,1fr));gap:8px;margin:16px 0}
+  .picker-item{background:#161b22;border:1px solid #30363d;border-radius:6px;padding:10px 14px;font-size:13px;font-family:monospace;display:flex;justify-content:space-between;align-items:center;transition:border-color .15s}
+  .picker-item:hover{border-color:#58a6ff}.picker-item .add-icon{color:#3fb950;font-weight:bold;font-size:18px}
+  .badge{display:inline-block;padding:2px 8px;border-radius:4px;font-size:11px;font-weight:700;margin-right:6px}
+  .badge-danger{background:rgba(248,81,73,0.2);color:#f85149}
+  .badge-warn{background:rgba(210,153,34,0.2);color:#d29922}
+  .badge-ok{background:rgba(63,185,80,0.2);color:#3fb950}
+</style>
+</head>
+<body>
+<div class="nav"><h2>🔐 safepush</h2><a href="/">← back</a></div>
+<div class="container">
+  <h1>👤 ${username}</h1>
+  <p style="color:#8b949e;margin-bottom:16px">${repos.length} public repos — click to scan</p>
+  <div id="status" style="color:#8b949e;font-size:13px;margin-bottom:8px"></div>
+  <div class="picker-grid" id="repo-grid">${repoList}</div>
+  <div class="scan-results" id="results" style="display:none;background:#161b22;border:1px solid #30363d;border-radius:8px;padding:20px;margin-top:24px">
+    <div id="results-body"></div>
+  </div>
+</div>
+<script>
+var BASE = "${env.BASE_URL || 'https://app.safepush.serghini.me'}";
+function api(m,p,b){var o={method:m,headers:{'content-type':'application/json'}};if(b)o.body=JSON.stringify(b);return fetch(BASE+p,o).then(function(r){return r.json()});}
+function scanRepo(owner,repo){
+  document.getElementById('status').textContent='Scanning '+owner+'/'+repo+'...';
+  var div=document.getElementById('results'),body=document.getElementById('results-body');
+  div.style.display='block';body.innerHTML='';
+  api('POST','/scan',{owner:owner,repo:repo}).then(function(res){
+    document.getElementById('status').textContent='Done.';
+    var r=res.repo?res:{repo:owner+'/'+repo,matches:[],summary:{}};
+    var bl=(r.summary.secrets||0)+(r.summary.sensitive_files||0)+(r.summary.merge_conflicts||0);
+    var wn=(r.summary.debug_prints||0)+(r.summary.hardcoded_connections||0);
+    var b=bl>0?'<span class="badge badge-danger">BLOCK</span>':wn>0?'<span class="badge badge-warn">WARN</span>':'<span class="badge badge-ok">CLEAN</span>';
+    var html='<div style="margin-bottom:8px">'+b+'<strong>'+r.repo+'</strong> — '+(r.matches?r.matches.length:0)+' finding(s)</div>';
+    if(r.matches&&r.matches.length>0){html+='<div style="max-height:400px;overflow-y:auto;border:1px solid #21262d;border-radius:4px">';
+      for(var j=0,mx=Math.min(r.matches.length,50);j<mx;j++){var m=r.matches[j],ic=m.severity==='BLOCK'?'\ud83d\udd34':m.severity==='WARN'?'\ud83d\udfe1':'\ud83d\udd35';
+        html+='<div style="padding:4px 10px;font-size:12px;color:#8b949e;border-bottom:1px solid #21262d">'+ic+' <code style="color:#58a6ff;font-size:11px">'+m.path+':'+(m.lineNumber||'?')+'</code> <span style="color:#e6edf3">'+m.pattern+'</span><span style="color:#484f58;margin-left:8px">'+(m.line||'').slice(0,80)+'</span></div>';}
+      if(r.matches.length>50)html+='<div style="padding:4px 10px;font-size:12px;color:#8b949e">... and '+(r.matches.length-50)+' more</div>';
+      html+='</div>';}
+    body.innerHTML=html;
+  }).catch(function(e){document.getElementById('status').textContent='Error: '+(e.message||'failed');});
+}
+</script>
+</body></html>`);
+}
+
 // ── My repos (for picker) ──────────────────────────────────
 
 async function handleMyRepos(request: Request, env: Env): Promise<Response> {
@@ -672,7 +811,16 @@ async function handleDashboardUI(request: Request, env: Env): Promise<Response> 
   </div>
 </div>
 <div class="container">
-  ${!sessionId ? `<div style="text-align:center;padding:80px 0">
+  <!-- Quick Scan — always visible, no auth needed for public repos -->
+  <div class="quick-scan" style="background:#161b22;border:1px solid #30363d;border-radius:8px;padding:20px;margin-bottom:32px">
+    <div class="section-title" style="margin-bottom:12px"><span>⚡ Quick Scan</span><span style="color:#8b949e;font-weight:400;font-size:12px;text-transform:none">paste a GitHub URL — no login needed</span></div>
+    <form method="GET" action="/quick-scan" style="display:flex;gap:12px;flex-wrap:wrap;align-items:center" onsubmit="var v=this.q.value.trim();if(!v)return false;var m=v.match(/(?:github\\.com\\/)?([^\\/]+)(?:\\/([^\\/]+))?/);if(!m)return false;this.action='/quick-scan?q='+encodeURIComponent(v);return true">
+      <input name="q" placeholder="github.com/owner/repo or owner/repo" style="background:#0d1117;border:1px solid #30363d;color:#e6edf3;padding:10px 14px;border-radius:6px;font-size:14px;flex:1;min-width:280px">
+      <button type="submit" class="btn btn-blue">🔍 Scan</button>
+    </form>
+  </div>
+
+  ${!sessionId ? `<div style="text-align:center;padding:40px 0">
     <h1>safepush</h1>
     <p style="color:#8b949e;margin:16px 0 32px">Track and scan your GitHub repos for secrets, debug prints, and more.</p>
     <a href="/login" class="btn btn-green" style="display:inline-block;text-decoration:none;font-size:16px;padding:14px 36px">🔑 Login with GitHub</a>
@@ -721,6 +869,57 @@ function api(method, path, body) {
   var opts = {method:method,headers:{'content-type':'application/json','x-safepush-session':SESSION},credentials:'same-origin'};
   if(body) opts.body = JSON.stringify(body);
   return fetch(BASE+path,opts).then(function(r){return r.json();}).then(function(d){if(d.error)throw new Error(d.error);return d;});
+}
+
+function quickScan() {
+  var raw = document.getElementById('quick-scan-input').value.trim();
+  if (!raw) return;
+  // Parse: https://github.com/owner/repo → owner/repo, github.com/user → scan profile
+  var repoMatch = raw.match(/(?:github\\.com\\/)?([^\\/\\s]+)\\/([^\\/\\s]+?)(?:\\.git)?(?:\\/.*)?$/);
+  var userMatch = raw.match(/(?:github\\.com\\/)?([^\\/\\s]+)$/);
+  var stat = document.getElementById('quick-scan-status');
+  var div = document.getElementById('quick-scan-results');
+  var body = document.getElementById('quick-scan-body');
+  div.style.display = 'block';
+  body.innerHTML = '';
+
+  if (repoMatch && repoMatch[2] && repoMatch[2] !== repoMatch[1]) {
+    // Single repo scan
+    var owner = repoMatch[1], repo = repoMatch[2].replace(/\/.*$/, '');
+    stat.textContent = 'Scanning ' + owner + '/' + repo + '...';
+    api('POST', '/scan', {owner: owner, repo: repo}).then(function(res) {
+      renderScanResult(res, owner, repo);
+      stat.textContent = 'Done.';
+    }).catch(function(e) { stat.textContent = 'Error: ' + (e.message || 'failed'); });
+  } else if (userMatch) {
+    // Profile — don't scan all repos (too slow), redirect to dashboard
+    var username = userMatch[1];
+    stat.textContent = 'Redirecting to profile scan...';
+    window.location.href = '/scan-profile-redirect?u=' + encodeURIComponent(username);
+  } else {
+    stat.textContent = 'Enter owner/repo or a GitHub profile URL';
+  }
+
+  function renderScanResult(res, owner, repo) {
+    var r = res.repo ? res : {repo: owner + '/' + repo, matches: [], summary: {}};
+    var bl = (r.summary.secrets || 0) + (r.summary.sensitive_files || 0) + (r.summary.merge_conflicts || 0);
+    var wn = (r.summary.debug_prints || 0) + (r.summary.hardcoded_connections || 0);
+    var b = bl > 0 ? '<span class="badge badge-danger">BLOCK</span>' : wn > 0 ? '<span class="badge badge-warn">WARN</span>' : '<span class="badge badge-ok">CLEAN</span>';
+    var n = r.matches ? r.matches.length : 0;
+    var html = '<div style="margin-bottom:8px">' + b + '<strong>' + r.repo + '</strong> — ' + n + ' finding(s) across ' + (r.totalFiles || '?') + ' files</div>';
+    if (r.matches && r.matches.length > 0) {
+      html += '<div style="max-height:400px;overflow-y:auto;border:1px solid #21262d;border-radius:4px">';
+      var max = Math.min(r.matches.length, 50);
+      for (var j = 0; j < max; j++) {
+        var m = r.matches[j];
+        var ic = m.severity === 'BLOCK' ? '\ud83d\udd34' : m.severity === 'WARN' ? '\ud83d\udfe1' : '\ud83d\udd35';
+        html += '<div style="padding:4px 10px;font-size:12px;color:#8b949e;border-bottom:1px solid #21262d">' + ic + ' <code style="color:#58a6ff;font-size:11px">' + m.path + ':' + (m.lineNumber || '?') + '</code> <span style="color:#e6edf3">' + m.pattern + '</span><span style="color:#484f58;margin-left:8px">' + (m.line || '').slice(0, 80) + '</span></div>';
+      }
+      if (r.matches.length > 50) html += '<div style="padding:4px 10px;font-size:12px;color:#8b949e">... and ' + (r.matches.length - 50) + ' more</div>';
+      html += '</div>';
+    }
+    body.innerHTML = html;
+  }
 }
 
 function addRepoBtn() {
@@ -892,6 +1091,28 @@ export default {
 
       const dashMatch = path.match(/^\/dashboard\/([^/]+)$/);
       if (method === "GET" && dashMatch) { const r = await handleDashboard(dashMatch[1], env); Object.entries(c).forEach(([k,v]) => r.headers.set(k,v)); return r; }
+
+      // Quick Scan form handler
+      if (method === "GET" && path === "/quick-scan") {
+        const q = url.searchParams.get("q") || "";
+        const repoMatch = q.match(/^(?:https?:\/\/)?(?:www\.)?github\.com\/([^\/]+)\/([^\/]+?)(?:\.git)?(?:\/.*)?$/);
+        const userMatch = q.match(/^(?:https?:\/\/)?(?:www\.)?github\.com\/([^\/\s]+)\/?$/);
+        const simpleMatch = q.match(/^([^\/\s]+)\/([^\/\s]+?)(?:\.git)?$/);
+        const simpleUser = q.match(/^([^\/\s]+)$/);
+        if (repoMatch || simpleMatch) {
+          const m = repoMatch || simpleMatch!;
+          return handleQuickScanResult(m[1], m[2], env);
+        } else if (userMatch || simpleUser) {
+          const u = (userMatch || simpleUser)![1];
+          return handleProfilePage(u, env);
+        }
+      }
+
+      // Profile redirect (Quick Scan for a GitHub user)
+      if (method === "GET" && path === "/scan-profile-redirect") {
+        const u = url.searchParams.get("u");
+        if (u) return handleProfilePage(u, env);
+      }
 
       // Tracked repos
       if (method === "GET"  && path === "/tracked")            { const r = await handleTrackedList(request, env); Object.entries(c).forEach(([k,v]) => r.headers.set(k,v)); return r; }
