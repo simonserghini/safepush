@@ -1,0 +1,14 @@
+{
+  "name": "safepush-worker",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run"
+  },
+  "devDependencies": {
+    "@cloudflare/workers-types": "^4.20250710.0",
+    "typescript": "^5.8.3",
+    "vitest": "^3.2.4"
+  }
+}

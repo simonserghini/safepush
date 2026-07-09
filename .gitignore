@@ -5,3 +5,9 @@
 *.swo
 *~
 .DS_Store
+
+# Cloudflare
+.wrangler/
+
+# Node
+node_modules/

@@ -26,16 +26,55 @@ import {
   getRepoInfo, listRepoFiles, getFileContent, listUserRepos, getPushDiff,
   verifyWebhookSignature, getOAuthURL, exchangeOAuthCode, getOAuthUser,
   createCommitStatus, createCheckRun, listAppInstallations, listInstallationRepos,
+  listOrgRepos, listAuthenticatedUserRepos,
 } from "./github";
+import {
+  escapeHtml, escapeJs, validateRepoSlug, parseJsonSafe,
+  checkRateLimit, clientIp, mapConcurrent,
+} from "./utils";
 
 export interface Env {
   SCANS: KVNamespace;
   SESSIONS: KVNamespace;
   DASHBOARD_TITLE: string;
-  GITHUB_CLIENT_ID: string;
-  GITHUB_CLIENT_SECRET: string;
-  WEBHOOK_SECRET: string;
-  BASE_URL: string;
+  GITHUB_CLIENT_ID?: string;
+  GITHUB_CLIENT_SECRET?: string;
+  WEBHOOK_SECRET?: string;
+  BASE_URL?: string;
+}
+
+// ── Config layer — KV first, env var fallback ──────────────
+
+interface AppConfig {
+  githubClientId: string;
+  githubClientSecret: string;
+  webhookSecret: string;
+  baseUrl: string;
+}
+
+async function loadConfig(env: Env): Promise<AppConfig> {
+  const [kvId, kvSecret, kvWebhook, kvBase] = await Promise.all([
+    env.SCANS.get("config:github_client_id"),
+    env.SCANS.get("config:github_client_secret"),
+    env.SCANS.get("config:webhook_secret"),
+    env.SCANS.get("config:base_url"),
+  ]);
+  return {
+    githubClientId: kvId || env.GITHUB_CLIENT_ID || "",
+    githubClientSecret: kvSecret || env.GITHUB_CLIENT_SECRET || "",
+    webhookSecret: kvWebhook || env.WEBHOOK_SECRET || "",
+    baseUrl: kvBase || env.BASE_URL || "",
+  };
+}
+
+function isConfigured(cfg: AppConfig): boolean {
+  return !!(cfg.githubClientId && cfg.githubClientSecret);
+}
+
+function resolveBaseUrl(cfg: AppConfig, request: Request): string {
+  if (cfg.baseUrl) return cfg.baseUrl;
+  const host = new URL(request.url).host;
+  return host ? `https://${host}` : "";
 }
 
 // ── SARIF export ──────────────────────────────────────────
@@ -126,16 +165,96 @@ async function extractToken(request: Request, env: Env): Promise<string | undefi
 
   // 4. Request body
   try {
-    const body = await request.clone().json() as any;
+    const body = await request.clone().json() as { token?: string };
     if (body.token) return body.token;
-  } catch {}
-
-  // 5. Query string
-  const url = new URL(request.url);
-  const queryToken = url.searchParams.get("token");
-  if (queryToken) return queryToken;
+  } catch {
+    // no JSON body or invalid JSON
+  }
 
   return undefined;
+}
+
+async function enforceRateLimit(request: Request, env: Env, bucket: string): Promise<Response | null> {
+  const ip = clientIp(request);
+  const allowed = await checkRateLimit(env.SCANS, `${bucket}:${ip}`, 30, 60);
+  if (!allowed) return json({ error: "rate limit exceeded — try again later" }, 429);
+  return null;
+}
+
+// ── Setup wizard ───────────────────────────────────────────
+
+async function handleSetupPage(env: Env): Promise<Response> {
+  const cfg = await loadConfig(env);
+  return html(`<!DOCTYPE html>
+<html lang="en"><head>
+<meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1.0">
+<title>${escapeHtml(env.DASHBOARD_TITLE)} — setup</title>
+<style>
+*{box-sizing:border-box;margin:0;padding:0}
+body{background:#0d1117;color:#e6edf3;font-family:system-ui;display:flex;align-items:center;justify-content:center;min-height:100vh}
+.card{background:#161b22;border:1px solid #30363d;border-radius:12px;padding:40px;max-width:480px;width:100%}
+h1{font-size:22px;margin-bottom:4px}h1 span{color:#3fb950}
+p.sub{color:#8b949e;font-size:14px;margin-bottom:24px}
+label{display:block;font-size:13px;color:#8b949e;margin-bottom:4px;margin-top:16px}
+input{width:100%;background:#0d1117;border:1px solid #30363d;color:#e6edf3;padding:10px 14px;border-radius:6px;font-size:14px;margin-bottom:4px}
+input:focus{outline:none;border-color:#58a6ff}
+.hint{font-size:11px;color:#484f58;margin-bottom:8px}
+.hint a{color:#58a6ff}
+.btn{width:100%;padding:12px;border-radius:6px;font-weight:600;font-size:15px;cursor:pointer;border:none;margin-top:20px;background:#3fb950;color:#000}
+.btn:hover{background:#2ea043}
+.success{background:rgba(63,185,80,0.15);border:1px solid #3fb950;border-radius:8px;padding:24px;text-align:center}
+.success h2{color:#3fb950;font-size:18px;margin-bottom:8px}
+.success p{color:#8b949e;font-size:13px}
+.error{color:#f85149;font-size:13px;margin-top:8px;display:none}
+</style></head><body>
+<div class="card">
+${cfg.githubClientId ? '<div class="success"><h2>✓ Configured</h2><p>safepush is ready. <a href="/" style="color:#58a6ff">Go to dashboard →</a></p></div>' : `
+<h1>safepush <span>setup</span></h1>
+<p class="sub">One-time configuration — create a GitHub OAuth App at <a href="https://github.com/settings/developers" target="_blank" style="color:#58a6ff">github.com/settings/developers</a> and paste the credentials below.</p>
+<form id="setup-form" onsubmit="submitSetup(event)">
+<label>GitHub OAuth Client ID</label>
+<input id="client-id" placeholder="Ov23li..." required>
+<label>GitHub OAuth Client Secret</label>
+<input id="client-secret" placeholder="••••••••" required>
+<p class="hint">Callback URL: <code id="cb-url">...</code> <a href="#" onclick="navigator.clipboard.writeText(document.getElementById('cb-url').textContent);return false" style="color:#58a6ff;font-size:11px">copy</a></p>
+<button type="submit" class="btn" id="submit-btn">Save & Finish Setup</button>
+<div class="error" id="error"></div>
+</form>
+<script>
+document.getElementById('cb-url').textContent = window.location.origin + '/callback';
+function submitSetup(e){e.preventDefault();
+var btn=document.getElementById('submit-btn'),err=document.getElementById('error');
+btn.textContent='Saving...';btn.disabled=true;err.style.display='none';
+fetch('/setup',{method:'POST',headers:{'content-type':'application/json'},
+body:JSON.stringify({github_client_id:document.getElementById('client-id').value,github_client_secret:document.getElementById('client-secret').value})})
+.then(function(r){return r.json();}).then(function(d){if(d.error)throw new Error(d.error);location.reload();})
+.catch(function(e){err.textContent=e.message;err.style.display='block';btn.textContent='Save & Finish Setup';btn.disabled=false;});}
+</script>`}
+</div></body></html>`);
+}
+
+async function handleSetup(request: Request, env: Env): Promise<Response> {
+  const cfg = await loadConfig(env);
+  if (isConfigured(cfg)) {
+    return json({ error: "already configured — update credentials via env vars or KV" }, 403);
+  }
+
+  let body: { github_client_id?: string; github_client_secret?: string };
+  try { body = await request.json(); } catch { return json({ error: "invalid JSON" }, 400); }
+  const { github_client_id, github_client_secret } = body;
+  if (!github_client_id || !github_client_secret) return json({ error: "Both fields required" }, 400);
+
+  const webhookSecret = crypto.randomUUID();
+  const baseUrl = resolveBaseUrl(cfg, request);
+
+  await Promise.all([
+    env.SCANS.put("config:github_client_id", github_client_id),
+    env.SCANS.put("config:github_client_secret", github_client_secret),
+    env.SCANS.put("config:webhook_secret", webhookSecret),
+    env.SCANS.put("config:base_url", baseUrl),
+  ]);
+
+  return json({ ok: true, base_url: baseUrl });
 }
 
 // ── Logout ─────────────────────────────────────────────────
@@ -153,11 +272,10 @@ function handleLogout(): Response {
 // ── OAuth ──────────────────────────────────────────────────
 
 async function handleLogin(request: Request, env: Env): Promise<Response> {
-  if (!env.GITHUB_CLIENT_ID) {
-    return html("<h1>OAuth not configured</h1><p>Set GITHUB_CLIENT_ID and GITHUB_CLIENT_SECRET env vars.</p>", 500);
-  }
+  const cfg = await loadConfig(env);
+  if (!isConfigured(cfg)) return Response.redirect("/setup", 302);
   const state = crypto.randomUUID();
-  const url = getOAuthURL(env.GITHUB_CLIENT_ID, `${env.BASE_URL}/callback`, state);
+  const url = getOAuthURL(cfg.githubClientId, `${cfg.baseUrl}/callback`, state);
 
   // Store state for CSRF protection
   await env.SESSIONS.put(`oauth:${state}`, "pending", { expirationTtl: 600 });
@@ -181,7 +299,8 @@ async function handleCallback(request: Request, env: Env): Promise<Response> {
   }
   await env.SESSIONS.delete(`oauth:${state}`);
 
-  const token = await exchangeOAuthCode(code, env.GITHUB_CLIENT_ID, env.GITHUB_CLIENT_SECRET);
+  const cfg = await loadConfig(env);
+  const token = await exchangeOAuthCode(code, cfg.githubClientId, cfg.githubClientSecret);
   if (!token) {
     return html("<h1>Failed to exchange code for token</h1>", 500);
   }
@@ -235,42 +354,52 @@ async function scanRepo(
         .map(l => l.trim())
         .filter(l => l && !l.startsWith("#"));
     }
-  } catch {}
+  } catch {
+    // .safepushignore is optional
+  }
 
   const files = await listRepoFiles(owner, repo, info.defaultBranch, token);
   const allMatches: ScanMatch[] = [];
+  const skipDirs = ["node_modules/", "dist/", "build/", ".git/", "target/",
+                    "__pycache__/", ".next/", "vendor/", "bower_components/"];
 
-  const maxFiles = Math.min(files.length, 500);
-  for (let i = 0; i < maxFiles; i++) {
-    const f = files[i];
-    if (f.size > 1_000_000) continue;
-    const skipDirs = ["node_modules/", "dist/", "build/", ".git/", "target/",
-                      "__pycache__/", ".next/", "vendor/", "bower_components/"];
-    if (skipDirs.some((d) => f.path.startsWith(d))) continue;
+  const candidates = files
+    .slice(0, 500)
+    .filter(f => f.size <= 1_000_000 && !skipDirs.some(d => f.path.startsWith(d)));
 
+  const scanResults = await mapConcurrent(candidates, async (f) => {
     try {
       const content = await getFileContent(owner, repo, f.path, info.defaultBranch, token);
-      if (content) {
-        allMatches.push(...scanFile(f.path, content, { ignorePaths }));
-      }
-    } catch {}
-  }
+      if (!content) return [] as ScanMatch[];
+      return scanFile(f.path, content, { ignorePaths });
+    } catch {
+      return [] as ScanMatch[];
+    }
+  }, 5);
+
+  for (const fileMatches of scanResults) allMatches.push(...fileMatches);
 
   return {
     repo: `${owner}/${repo}`,
     scannedAt: new Date().toISOString(),
-    totalFiles: maxFiles,
+    totalFiles: candidates.length,
     matches: allMatches,
     summary: summarize(allMatches),
   };
 }
 
 async function handleScan(request: Request, env: Env): Promise<Response> {
-  let body: any;
+  const limited = await enforceRateLimit(request, env, "scan");
+  if (limited) return limited;
+
+  let body: { owner?: string; repo?: string };
   try { body = await request.json(); } catch { return json({ error: "invalid JSON body" }, 400); }
 
   const { owner, repo } = body;
   if (!owner || !repo) return json({ error: "owner and repo are required" }, 400);
+  const ownerErr = validateRepoSlug(owner, "owner");
+  const repoErr = validateRepoSlug(repo, "repo");
+  if (ownerErr || repoErr) return json({ error: ownerErr || repoErr }, 400);
 
   const token = await extractToken(request, env);
   const format = new URL(request.url).searchParams.get("format");
@@ -286,14 +415,22 @@ async function handleScan(request: Request, env: Env): Promise<Response> {
 }
 
 async function handleScanProfile(request: Request, env: Env): Promise<Response> {
-  let body: any;
+  const limited = await enforceRateLimit(request, env, "scan-profile");
+  if (limited) return limited;
+
+  let body: { username?: string };
   try { body = await request.json(); } catch { return json({ error: "invalid JSON body" }, 400); }
 
   const username = body.username;
   if (!username) return json({ error: "username is required" }, 400);
+  const userErr = validateRepoSlug(username, "username");
+  if (userErr) return json({ error: userErr }, 400);
 
   const token = await extractToken(request, env);
-  const repos = await listUserRepos(username, token);
+  const authUser = token ? await getOAuthUser(token) : null;
+  const repos = (token && authUser === username)
+    ? await listAuthenticatedUserRepos(token)
+    : await listUserRepos(username, token);
   const results: ScanResult[] = [];
   const errors: string[] = [];
 
@@ -317,6 +454,9 @@ async function handleScanProfile(request: Request, env: Env): Promise<Response> 
 }
 
 async function handleScanInstallations(request: Request, env: Env): Promise<Response> {
+  const limited = await enforceRateLimit(request, env, "scan-installations");
+  if (limited) return limited;
+
   const token = await extractToken(request, env);
   if (!token) return json({ error: "authentication required — provide a GitHub token" }, 401);
 
@@ -347,13 +487,15 @@ async function handleWebhook(request: Request, env: Env): Promise<Response> {
   const rawBody = await request.text();
   const signature = request.headers.get("x-hub-signature-256");
 
-  // Verify signature if webhook secret is configured
-  if (env.WEBHOOK_SECRET) {
-    const valid = await verifyWebhookSignature(rawBody, signature, env.WEBHOOK_SECRET);
-    if (!valid) return json({ error: "invalid webhook signature" }, 401);
+  const cfg = await loadConfig(env);
+  if (!cfg.webhookSecret) {
+    return json({ error: "webhook secret not configured" }, 503);
   }
+  const valid = await verifyWebhookSignature(rawBody, signature, cfg.webhookSecret);
+  if (!valid) return json({ error: "invalid webhook signature" }, 401);
 
-  const body = JSON.parse(rawBody);
+  const body = parseJsonSafe<Record<string, any>>(rawBody);
+  if (!body) return json({ error: "invalid webhook payload" }, 400);
   const event = request.headers.get("x-github-event");
   const deliveryId = request.headers.get("x-github-delivery");
 
@@ -408,11 +550,14 @@ async function handleWebhook(request: Request, env: Env): Promise<Response> {
         : allMatches.map(m => `- **${m.path}** L${m.lineNumber}: ${m.pattern}: \`${m.line}\``).join("\n");
 
       try {
+        const baseUrl = cfg.baseUrl || "";
         await createCommitStatus(owner, repo, headCommit,
-          hasBlocks ? "failure" : "success", desc, `${env.BASE_URL}/scan/${owner}/${repo}`, token);
+          hasBlocks ? "failure" : "success", desc, `${baseUrl}/scan/${owner}/${repo}`, token);
         await createCheckRun(owner, repo, headCommit, "push scan",
           `${allMatches.length} finding(s)`, details, token);
-      } catch {}
+      } catch {
+        // status/check APIs may be unavailable for some tokens
+      }
     }
 
     return json({
@@ -428,6 +573,9 @@ async function handleWebhook(request: Request, env: Env): Promise<Response> {
 }
 
 async function handleWebhookSetup(request: Request, env: Env): Promise<Response> {
+  const cfg = await loadConfig(env);
+  const baseUrl = resolveBaseUrl(cfg, request);
+  const webhookSecret = cfg.webhookSecret || "(set via setup wizard or WEBHOOK_SECRET env var)";
   return html(`<!DOCTYPE html>
 <html lang="en">
 <head>
@@ -455,15 +603,15 @@ async function handleWebhookSetup(request: Request, env: Env): Promise<Response>
 <div class="step">
 <h2>2. Add webhook</h2>
 <p><strong>Payload URL:</strong></p>
-<pre>${env.BASE_URL}/webhook</pre>
+<pre>${escapeHtml(baseUrl)}/webhook</pre>
 <p><strong>Content type:</strong> <code>application/json</code></p>
-<p><strong>Secret:</strong> same as <code>WEBHOOK_SECRET</code> env var</p>
+<p><strong>Secret:</strong> <code>${escapeHtml(webhookSecret)}</code></p>
 <p><strong>Events:</strong> Just the <code>push</code> event</p>
 </div>
 
 <div class="step">
 <h2>3. Test it</h2>
-<pre>curl -X POST ${env.BASE_URL}/webhook \\
+<pre>curl -X POST ${escapeHtml(baseUrl)}/webhook \\
   -H 'x-github-event: ping' \\
   -H 'content-type: application/json' \\
   -d '{"zen":"test"}'</pre>
@@ -473,7 +621,7 @@ async function handleWebhookSetup(request: Request, env: Env): Promise<Response>
 <div class="step">
 <h2>4. Scan all repos in one go</h2>
 <p>Already have a token? Scan all your repos:</p>
-<pre>curl -X POST ${env.BASE_URL}/scan-installations \\
+<pre>curl -X POST ${escapeHtml(baseUrl)}/scan-installations \\
   -H 'authorization: Bearer YOUR_GITHUB_TOKEN'</pre>
 </div>
 </body></html>`);
@@ -484,13 +632,17 @@ async function handleWebhookSetup(request: Request, env: Env): Promise<Response>
 async function handleGetScan(owner: string, repo: string, env: Env): Promise<Response> {
   const data = await env.SCANS.get(`scan:${owner}:${repo}`);
   if (!data) return json({ error: "no scan found for this repo. POST /scan first." }, 404);
-  return json(JSON.parse(data));
+  const parsed = parseJsonSafe<ScanResult>(data);
+  if (!parsed) return json({ error: "stored scan data is corrupt" }, 500);
+  return json(parsed);
 }
 
 async function handleDashboard(owner: string, env: Env): Promise<Response> {
   const data = await env.SCANS.get(`profile:${owner}`);
   if (!data) return json({ owner, message: "No scan profile found. POST /scan-profile with {username} to start." });
-  return json(JSON.parse(data));
+  const parsed = parseJsonSafe<Record<string, unknown>>(data);
+  if (!parsed) return json({ error: "stored profile data is corrupt" }, 500);
+  return json(parsed);
 }
 
 // ── Tracked repos ─────────────────────────────────────────
@@ -499,7 +651,8 @@ interface TrackedRepo { owner: string; repo: string; addedAt: string; }
 
 async function getTrackedRepos(sessionId: string, env: Env): Promise<TrackedRepo[]> {
   const raw = await env.SCANS.get(`tracked:${sessionId}`);
-  return raw ? JSON.parse(raw) : [];
+  if (!raw) return [];
+  return parseJsonSafe<TrackedRepo[]>(raw) || [];
 }
 
 async function saveTrackedRepos(sessionId: string, repos: TrackedRepo[], env: Env): Promise<void> {
@@ -523,6 +676,9 @@ async function handleTrackedAdd(request: Request, env: Env): Promise<Response> {
   try { body = await request.json(); } catch { return json({ error: "invalid JSON" }, 400); }
   const { owner, repo } = body;
   if (!owner || !repo) return json({ error: "owner and repo required" }, 400);
+  const ownerErr = validateRepoSlug(owner, "owner");
+  const repoErr = validateRepoSlug(repo, "repo");
+  if (ownerErr || repoErr) return json({ error: ownerErr || repoErr }, 400);
 
   const repos = await getTrackedRepos(sessionId, env);
   if (repos.some(r => r.owner === owner && r.repo === repo)) {
@@ -572,16 +728,26 @@ async function handleTrackedScan(request: Request, env: Env): Promise<Response> 
 // ── Quick scan result page ─────────────────────────────────
 
 async function handleQuickScanResult(owner: string, repo: string, env: Env): Promise<Response> {
+  const ownerErr = validateRepoSlug(owner, "owner");
+  const repoErr = validateRepoSlug(repo, "repo");
+  if (ownerErr || repoErr) {
+    return html(`<!DOCTYPE html><html><head><meta charset="UTF-8"><title>${escapeHtml(env.DASHBOARD_TITLE)} — error</title>
+<style>body{background:#0d1117;color:#e6edf3;font-family:system-ui;display:flex;align-items:center;justify-content:center;min-height:100vh;margin:0}
+.card{background:#161b22;border:1px solid #30363d;border-radius:12px;padding:48px;text-align:center}
+h1{color:#f85149}a{color:#58a6ff}</style></head><body>
+<div class="card"><h1>❌ Invalid input</h1><p style="color:#8b949e">${escapeHtml(ownerErr || repoErr || "invalid repo")}</p><p style="margin-top:16px"><a href="/">← back</a></p></div></body></html>`, 400);
+  }
+
   let result: ScanResult;
   try {
     result = await scanRepo(owner, repo);
     await env.SCANS.put(`scan:${owner}:${repo}`, JSON.stringify(result), { expirationTtl: 86400 * 7 });
   } catch (e: any) {
-    return html(`<!DOCTYPE html><html><head><meta charset="UTF-8"><title>safepush — error</title>
+    return html(`<!DOCTYPE html><html><head><meta charset="UTF-8"><title>${escapeHtml(env.DASHBOARD_TITLE)} — error</title>
 <style>body{background:#0d1117;color:#e6edf3;font-family:system-ui;display:flex;align-items:center;justify-content:center;min-height:100vh;margin:0}
 .card{background:#161b22;border:1px solid #30363d;border-radius:12px;padding:48px;text-align:center}
 h1{color:#f85149}a{color:#58a6ff}</style></head><body>
-<div class="card"><h1>❌ Scan failed</h1><p style="color:#8b949e">${owner}/${repo}: ${e.message}</p><p style="margin-top:16px"><a href="/">← back</a></p></div></body></html>`, 500);
+<div class="card"><h1>❌ Scan failed</h1><p style="color:#8b949e">${escapeHtml(owner)}/${escapeHtml(repo)}: ${escapeHtml(e.message || "unknown error")}</p><p style="margin-top:16px"><a href="/">← back</a></p></div></body></html>`, 500);
   }
 
   const badge = (result.summary.secrets || 0) + (result.summary.sensitive_files || 0) + (result.summary.merge_conflicts || 0) > 0
@@ -594,13 +760,13 @@ h1{color:#f85149}a{color:#58a6ff}</style></head><body>
     ? '<p style="color:#3fb950">No issues found. 🎉</p>'
     : result.matches.slice(0, 100).map(m => {
         const icon = m.severity === "BLOCK" ? "🔴" : m.severity === "WARN" ? "🟡" : "🔵";
-        return `<div style="padding:6px 12px;font-size:12px;color:#8b949e;border-bottom:1px solid #21262d">${icon} <code style="color:#58a6ff;font-size:11px">${m.path}:${m.lineNumber || "?"}</code> <span style="color:#e6edf3">${m.pattern}</span><span style="color:#484f58;margin-left:8px">${(m.line || "").slice(0, 100)}</span></div>`;
+        return `<div style="padding:6px 12px;font-size:12px;color:#8b949e;border-bottom:1px solid #21262d">${icon} <code style="color:#58a6ff;font-size:11px">${escapeHtml(m.path)}:${m.lineNumber || "?"}</code> <span style="color:#e6edf3">${escapeHtml(m.pattern)}</span><span style="color:#484f58;margin-left:8px">${escapeHtml((m.line || "").slice(0, 100))}</span></div>`;
       }).join("")
     + (result.matches.length > 100 ? `<div style="padding:6px 12px;font-size:12px;color:#8b949e">... and ${result.matches.length - 100} more</div>` : "");
 
   return html(`<!DOCTYPE html><html lang="en"><head>
 <meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1.0">
-<title>safepush — ${owner}/${repo}</title>
+<title>${escapeHtml(env.DASHBOARD_TITLE)} — ${escapeHtml(owner)}/${escapeHtml(repo)}</title>
 <style>
 *{box-sizing:border-box;margin:0;padding:0}
 body{background:#0d1117;color:#e6edf3;font-family:system-ui;min-height:100vh}
@@ -614,9 +780,9 @@ h1{font-size:24px;margin-bottom:8px}
 .stat.red .num{color:#f85149}.stat.yellow .num{color:#d29922}.stat.blue .num{color:#58a6ff}.stat.green .num{color:#3fb950}
 .findings{background:#161b22;border:1px solid #30363d;border-radius:8px;overflow:hidden;margin-top:16px}
 </style></head><body>
-<div class="nav"><h2>🔐 safepush</h2><a href="/">← back</a></div>
+<div class="nav"><h2>🔐 ${escapeHtml(env.DASHBOARD_TITLE)}</h2><a href="/">← back</a></div>
 <div class="container">
-<h1>${owner}/${repo}</h1>
+<h1>${escapeHtml(owner)}/${escapeHtml(repo)}</h1>
 <p style="color:#8b949e;margin-bottom:16px">Scanned ${result.totalFiles} files — ${badge}</p>
 <div class="stats">
 <div class="stat red"><div class="num">${result.summary.secrets || 0}</div><div class="label">Secrets</div></div>
@@ -633,7 +799,16 @@ h1{font-size:24px;margin-bottom:8px}
 
 // ── Profile page (quick scan for any GitHub user) ──────────
 
-async function handleProfilePage(username: string, env: Env): Promise<Response> {
+async function handleProfilePage(username: string, env: Env, request: Request): Promise<Response> {
+  const userErr = validateRepoSlug(username, "username");
+  if (userErr) {
+    return html(`<!DOCTYPE html><html><head><meta charset="UTF-8"><title>${escapeHtml(env.DASHBOARD_TITLE)}</title></head>
+<body style="background:#0d1117;color:#e6edf3;font-family:system-ui;padding:40px"><p>${escapeHtml(userErr)}</p><a href="/" style="color:#58a6ff">← back</a></body></html>`, 400);
+  }
+
+  const cfg = await loadConfig(env);
+  const baseUrl = resolveBaseUrl(cfg, request);
+
   let repos: Array<{ name: string; owner: string }> = [];
   let error = "";
   try {
@@ -643,17 +818,17 @@ async function handleProfilePage(username: string, env: Env): Promise<Response> 
   }
 
   const repoList = repos.length === 0
-    ? `<p style="color:#8b949e">${error || "No public repos found for " + username}</p>`
+    ? `<p style="color:#8b949e">${escapeHtml(error || `No public repos found for ${username}`)}</p>`
     : repos.map(r => `
-      <div class="picker-item" onclick="scanRepo('${r.owner}','${r.name}')" style="cursor:pointer">
-        <span>${r.owner}/${r.name}</span><span class="add-icon" style="display:inline">+</span>
+      <div class="picker-item" data-owner="${escapeHtml(r.owner)}" data-repo="${escapeHtml(r.name)}" style="cursor:pointer">
+        <span>${escapeHtml(r.owner)}/${escapeHtml(r.name)}</span><span class="add-icon" style="display:inline">+</span>
       </div>`).join("");
 
   return html(`<!DOCTYPE html>
 <html lang="en">
 <head>
 <meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1.0">
-<title>safepush — ${username}</title>
+<title>${escapeHtml(env.DASHBOARD_TITLE)} — ${escapeHtml(username)}</title>
 <style>
   *{box-sizing:border-box;margin:0;padding:0}
   body{background:#0d1117;color:#e6edf3;font-family:system-ui;min-height:100vh}
@@ -672,9 +847,9 @@ async function handleProfilePage(username: string, env: Env): Promise<Response> 
 </style>
 </head>
 <body>
-<div class="nav"><h2>🔐 safepush</h2><a href="/">← back</a></div>
+<div class="nav"><h2>🔐 ${escapeHtml(env.DASHBOARD_TITLE)}</h2><a href="/">← back</a></div>
 <div class="container">
-  <h1>👤 ${username}</h1>
+  <h1>👤 ${escapeHtml(username)}</h1>
   <p style="color:#8b949e;margin-bottom:16px">${repos.length} public repos — click to scan</p>
   <div id="status" style="color:#8b949e;font-size:13px;margin-bottom:8px"></div>
   <div class="picker-grid" id="repo-grid">${repoList}</div>
@@ -683,8 +858,9 @@ async function handleProfilePage(username: string, env: Env): Promise<Response> 
   </div>
 </div>
 <script>
-var BASE = "${env.BASE_URL || 'https://app.safepush.serghini.me'}";
+var BASE = "${escapeJs(baseUrl)}";
 function api(m,p,b){var o={method:m,headers:{'content-type':'application/json'}};if(b)o.body=JSON.stringify(b);return fetch(BASE+p,o).then(function(r){return r.json()});}
+document.querySelectorAll('.picker-item[data-owner]').forEach(function(el){el.onclick=function(){scanRepo(el.dataset.owner,el.dataset.repo);};});
 function scanRepo(owner,repo){
   document.getElementById('status').textContent='Scanning '+owner+'/'+repo+'...';
   var div=document.getElementById('results'),body=document.getElementById('results-body');
@@ -721,7 +897,14 @@ async function handleMyRepos(request: Request, env: Env): Promise<Response> {
   const username = await env.SESSIONS.get(`user:${sessionId}`);
   if (!username) return json({ error: "user not found" }, 401);
 
-  const repos = await listUserRepos(username, token);
+  // Load user's personal + org repos (including private) via authenticated API
+  const repos = await listAuthenticatedUserRepos(token);
+  const orgRepos = await listOrgRepos(token);
+  // Merge and dedupe
+  const seen = new Set(repos.map(r => `${r.owner}/${r.name}`));
+  for (const r of orgRepos) {
+    if (!seen.has(`${r.owner}/${r.name}`)) repos.push(r);
+  }
   return json(repos);
 }
 
@@ -734,6 +917,10 @@ function getSessionCookie(request: Request): string {
 }
 
 async function handleDashboardUI(request: Request, env: Env): Promise<Response> {
+  const cfg = await loadConfig(env);
+  const baseUrl = resolveBaseUrl(cfg, request);
+  const title = env.DASHBOARD_TITLE || "safepush";
+
   const sessionId = getSessionCookie(request)
     || new URL(request.url).searchParams.get("session")
     || request.headers.get("x-safepush-session") || "";
@@ -746,10 +933,10 @@ async function handleDashboardUI(request: Request, env: Env): Promise<Response> 
     ? `<tr><td colspan="4" style="color:#8b949e;text-align:center;padding:32px">No repos tracked yet. Add one below or load your repos.</td></tr>`
     : repos.map(r => `
       <tr>
-        <td style="font-family:monospace">${r.owner}/${r.repo}</td>
-        <td style="color:#8b949e;font-size:12px">${r.addedAt.slice(0,10)}</td>
-        <td><a href="/scan/${r.owner}/${r.repo}" style="color:#58a6ff">view</a></td>
-        <td><button onclick="removeRepoBtn('${r.owner}','${r.repo}')" style="background:none;border:none;color:#f85149;cursor:pointer;font-size:16px">&times;</button></td>
+        <td style="font-family:monospace">${escapeHtml(r.owner)}/${escapeHtml(r.repo)}</td>
+        <td style="color:#8b949e;font-size:12px">${escapeHtml(r.addedAt.slice(0, 10))}</td>
+        <td><a href="/scan/${encodeURIComponent(r.owner)}/${encodeURIComponent(r.repo)}" style="color:#58a6ff">view</a></td>
+        <td><button onclick="removeRepoBtn('${escapeJs(r.owner)}','${escapeJs(r.repo)}')" style="background:none;border:none;color:#f85149;cursor:pointer;font-size:16px">&times;</button></td>
       </tr>`).join("");
 
   return html(`<!DOCTYPE html>
@@ -757,7 +944,7 @@ async function handleDashboardUI(request: Request, env: Env): Promise<Response> 
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>safepush — dashboard</title>
+<title>${escapeHtml(title)} — dashboard</title>
 <style>
   * { box-sizing:border-box; margin:0; padding:0; }
   body { background:#0d1117; color:#e6edf3; font-family:system-ui; min-height:100vh; }
@@ -791,6 +978,8 @@ async function handleDashboardUI(request: Request, env: Env): Promise<Response> 
   .badge-warn { background:rgba(210,153,34,0.2); color:#d29922; }
   .badge-ok { background:rgba(63,185,80,0.2); color:#3fb950; }
   #status { margin-left:12px; font-size:13px; color:#8b949e; }
+  .spinner { display:inline-block; width:14px; height:14px; border:2px solid #30363d; border-top-color:#58a6ff; border-radius:50%; animation:spin .6s linear infinite; vertical-align:middle; margin-right:6px; }
+  @keyframes spin { to { transform:rotate(360deg); } }
   .picker-grid { display:grid; grid-template-columns:repeat(auto-fill,minmax(240px,1fr)); gap:8px; margin-bottom:24px; }
   .picker-item { background:#161b22; border:1px solid #30363d; border-radius:6px; padding:10px 14px; cursor:pointer; font-size:13px; font-family:monospace; display:flex; justify-content:space-between; align-items:center; transition:border-color .15s; }
   .picker-item:hover { border-color:#58a6ff; }
@@ -804,9 +993,9 @@ async function handleDashboardUI(request: Request, env: Env): Promise<Response> 
 </head>
 <body>
 <div class="nav">
-  <h2>🔐 safepush</h2>
+  <h2>🔐 ${escapeHtml(title)}</h2>
   <div class="nav-right">
-    <span class="user">${username ? `👤 ${username}` : 'not logged in'}</span>
+    <span class="user">${username ? `👤 ${escapeHtml(username)}` : "not logged in"}</span>
     ${sessionId ? '<a href="/logout">Logout</a>' : '<a href="/login">Login</a>'}
   </div>
 </div>
@@ -829,7 +1018,7 @@ async function handleDashboardUI(request: Request, env: Env): Promise<Response> 
 
   <div class="section-title" style="margin-top:24px"><span>🔍 Load your repos</span></div>
   <div style="display:flex;gap:12px;margin-bottom:16px;flex-wrap:wrap;align-items:center">
-    <input id="repo-owner" placeholder="GitHub username or org" value="${username}" style="background:#0d1117;border:1px solid #30363d;color:#e6edf3;padding:10px 14px;border-radius:6px;font-size:14px;width:240px">
+    <input id="repo-owner" placeholder="GitHub username or org" value="${escapeHtml(username || "")}" style="background:#0d1117;border:1px solid #30363d;color:#e6edf3;padding:10px 14px;border-radius:6px;font-size:14px;width:240px">
     <button class="btn btn-outline" onclick="loadRepos()" id="btn-load">Load Repos</button>
     <button class="btn btn-blue" onclick="trackAll()">+ Track All</button>
     <span id="load-status" style="font-size:13px;color:#8b949e"></span>
@@ -838,7 +1027,7 @@ async function handleDashboardUI(request: Request, env: Env): Promise<Response> 
 
   <div class="section-title"><span>📌 Tracked (${repos.length})</span></div>
   <div class="add-form">
-    <input id="owner" placeholder="owner" value="${username}" style="flex:1;min-width:140px">
+    <input id="owner" placeholder="owner" value="${escapeHtml(username || "")}" style="flex:1;min-width:140px">
     <input id="repo" placeholder="repo name" style="flex:1;min-width:140px">
     <button class="btn btn-green" onclick="addRepoBtn()">+ Add</button>
   </div>
@@ -860,10 +1049,10 @@ async function handleDashboardUI(request: Request, env: Env): Promise<Response> 
 </div>
 
 <script>
-var SESSION = "${sessionId}";
-var BASE = "${env.BASE_URL || `https://${new URL(request.url).host}`}";
+var SESSION = "${escapeJs(sessionId)}";
+var BASE = "${escapeJs(baseUrl)}";
 var trackedSet = {};
-${repos.map(r => 'trackedSet["' + r.owner + '/' + r.repo + '"]=1;').join('\n')}
+${repos.map(r => `trackedSet["${escapeJs(`${r.owner}/${r.repo}`)}"]=1;`).join("\n")}
 
 function api(method, path, body) {
   var opts = {method:method,headers:{'content-type':'application/json','x-safepush-session':SESSION},credentials:'same-origin'};
@@ -969,7 +1158,7 @@ function loadRepos(){
   var o=document.getElementById('repo-owner').value.trim();
   if(!o)return;
   var s=document.getElementById('load-status'),g=document.getElementById('repo-picker');
-  s.textContent='Loading...';g.innerHTML='';
+  s.innerHTML='<span class="spinner"></span> Loading repos...';g.innerHTML='';
   api('GET','/my-repos').then(function(repos){
     s.textContent=repos.length+' repos found';
     repos.forEach(function(r){var k=r.owner+'/'+r.name,d=document.createElement('div');d.className='picker-item'+(trackedSet[k]?' added':'');d.innerHTML='<span>'+k+'</span><span class="add-icon">'+(trackedSet[k]?'\\u2713':'+')+'</span>';if(!trackedSet[k])d.onclick=function(){trackRepo(r.owner,r.name,d);};g.appendChild(d);});
@@ -992,69 +1181,6 @@ function trackAll(){
 </body></html>`);
 }
 
-// ── Landing page ──────────────────────────────────────────
-
-async function handleLanding(env: Env): Promise<Response> {
-  const hasOAuth = !!(env.GITHUB_CLIENT_ID && env.GITHUB_CLIENT_SECRET);
-  const loginBlock = hasOAuth
-    ? `<a href="/login" style="display:inline-block;background:#3fb950;color:#000;padding:12px 28px;border-radius:8px;text-decoration:none;font-weight:700;font-size:16px">🔑 Login with GitHub</a>`
-    : `<p style="color:#d29922">⚠ OAuth not configured. Set GITHUB_CLIENT_ID and GITHUB_CLIENT_SECRET.</p>`;
-
-  return html(`<!DOCTYPE html>
-<html lang="en">
-<head>
-<meta charset="UTF-8">
-<meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>safepush — cloud scanner</title>
-<style>
-  * { box-sizing:border-box; margin:0; padding:0; }
-  body { background:#0d1117; color:#e6edf3; font-family:system-ui; min-height:100vh; display:flex; flex-direction:column; align-items:center; justify-content:center; }
-  .card { background:#161b22; border:1px solid #30363d; border-radius:12px; padding:48px; max-width:680px; text-align:center; }
-  h1 { font-size:2rem; margin-bottom:8px; }
-  h1 span { color:#3fb950; }
-  .sub { color:#8b949e; margin-bottom:28px; }
-  .auth-box { margin:24px 0; padding:20px; background:#0d1117; border-radius:8px; }
-  .section { text-align:left; margin:24px 0; }
-  .section h3 { color:#58a6ff; margin-bottom:8px; font-size:14px; text-transform:uppercase; letter-spacing:0.05em; }
-  code { background:#0d1117; padding:10px 16px; border-radius:6px; font-size:13px; color:#3fb950; display:block; margin:8px 0; text-align:left; word-break:break-all; }
-  .tag { display:inline-block; padding:2px 8px; border-radius:4px; font-size:11px; font-weight:700; margin-right:4px; }
-  .tag-green { background:rgba(63,185,80,0.2); color:#3fb950; }
-  .tag-blue { background:rgba(88,166,255,0.2); color:#58a6ff; }
-  .tag-yellow { background:rgba(210,153,34,0.2); color:#d29922; }
-</style>
-</head>
-<body>
-<div class="card">
-  <h1>safepush <span>cloud scanner</span></h1>
-  <p class="sub">Scan GitHub repos for secrets, API keys, debug prints — continuously.</p>
-
-  <div class="auth-box">${loginBlock}</div>
-
-  <div class="section">
-    <h3><span class="tag tag-green">POST</span> Scan a repo</h3>
-    <code>curl -X POST ${env.BASE_URL}/scan -H 'content-type: application/json' -d '{"owner":"user","repo":"repo"}'</code>
-  </div>
-  <div class="section">
-    <h3><span class="tag tag-green">POST</span> Scan entire profile</h3>
-    <code>curl -X POST ${env.BASE_URL}/scan-profile -H 'content-type: application/json' -d '{"username":"github-user"}'</code>
-  </div>
-  <div class="section">
-    <h3><span class="tag tag-yellow">POST</span> Webhook (CI)</h3>
-    <code>curl -X POST ${env.BASE_URL}/webhook -H 'x-github-event: push' -H 'content-type: application/json' -d @payload.json</code>
-  </div>
-  <div class="section">
-    <h3><span class="tag tag-blue">GET</span> View results</h3>
-    <code>curl ${env.BASE_URL}/dashboard/:user</code>
-    <code>curl ${env.BASE_URL}/scan/:owner/:repo</code>
-  </div>
-  <p style="color:#8b949e; font-size:13px; margin-top:24px">
-    Add <code style="display:inline;padding:2px 6px;font-size:12px">-H 'x-github-token: ghp_xxx'</code> for private repos &nbsp;|&nbsp;
-    <a href="/webhook/setup" style="color:#58a6ff">webhook setup guide</a>
-  </p>
-</div>
-</body></html>`);
-}
-
 // ── Main ──────────────────────────────────────────────────
 
 export default {
@@ -1070,6 +1196,10 @@ export default {
     const c = cors(request);
 
     try {
+      // Setup wizard
+      if (method === "GET" && path === "/setup")         return handleSetupPage(env);
+      if (method === "POST" && path === "/setup")        { const r = await handleSetup(request, env); Object.entries(c).forEach(([k,v]) => r.headers.set(k,v)); return r; }
+
       // Auth
       if (method === "GET" && path === "/login")         return handleLogin(request, env);
       if (method === "GET" && path === "/callback")      return handleCallback(request, env);
@@ -1094,6 +1224,9 @@ export default {
 
       // Quick Scan form handler
       if (method === "GET" && path === "/quick-scan") {
+        const limited = await enforceRateLimit(request, env, "quick-scan");
+        if (limited) return limited;
+
         const q = url.searchParams.get("q") || "";
         const repoMatch = q.match(/^(?:https?:\/\/)?(?:www\.)?github\.com\/([^\/]+)\/([^\/]+?)(?:\.git)?(?:\/.*)?$/);
         const userMatch = q.match(/^(?:https?:\/\/)?(?:www\.)?github\.com\/([^\/\s]+)\/?$/);
@@ -1104,14 +1237,14 @@ export default {
           return handleQuickScanResult(m[1], m[2], env);
         } else if (userMatch || simpleUser) {
           const u = (userMatch || simpleUser)![1];
-          return handleProfilePage(u, env);
+          return handleProfilePage(u, env, request);
         }
       }
 
       // Profile redirect (Quick Scan for a GitHub user)
       if (method === "GET" && path === "/scan-profile-redirect") {
         const u = url.searchParams.get("u");
-        if (u) return handleProfilePage(u, env);
+        if (u) return handleProfilePage(u, env, request);
       }
 
       // Tracked repos

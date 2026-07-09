@@ -131,8 +131,9 @@ export async function listRepoFiles(
 export async function getFileContent(
   owner: string, repo: string, path: string, branch: string, token?: string
 ): Promise<string | null> {
+  const encodedPath = path.split("/").map(encodeURIComponent).join("/");
   const resp = await fetch(
-    `${GITHUB_API}/repos/${owner}/${repo}/contents/${encodeURIComponent(path)}?ref=${branch}`,
+    `${GITHUB_API}/repos/${owner}/${repo}/contents/${encodedPath}?ref=${branch}`,
     { headers: headers(token) }
   );
   if (!resp.ok) return null;
@@ -143,6 +144,26 @@ export async function getFileContent(
   const bytes = new Uint8Array(raw.length);
   for (let i = 0; i < raw.length; i++) bytes[i] = raw.charCodeAt(i);
   return new TextDecoder("utf-8").decode(bytes);
+}
+
+export async function listAuthenticatedUserRepos(
+  token: string
+): Promise<Array<{ name: string; owner: string }>> {
+  const repos: Array<{ name: string; owner: string }> = [];
+  let page = 1;
+  while (true) {
+    const resp = await fetch(
+      `${GITHUB_API}/user/repos?per_page=100&page=${page}&sort=updated&affiliation=owner,organization_member`,
+      { headers: headers(token) }
+    );
+    if (!resp.ok) break;
+    const data = await resp.json() as any[];
+    if (data.length === 0) break;
+    for (const r of data) repos.push({ name: r.name, owner: r.owner.login });
+    page++;
+    if (page > 10) break;
+  }
+  return repos;
 }
 
 export async function listUserRepos(
@@ -161,6 +182,31 @@ export async function listUserRepos(
     for (const r of data) repos.push({ name: r.name, owner: r.owner.login });
     page++;
     if (page > 10) break;
+  }
+  return repos;
+}
+
+export async function listOrgRepos(
+  token: string
+): Promise<Array<{ name: string; owner: string }>> {
+  const repos: Array<{ name: string; owner: string }> = [];
+  const orgsResp = await fetch(`${GITHUB_API}/user/orgs?per_page=100`, { headers: headers(token) });
+  if (!orgsResp.ok) return repos;
+  const orgs = await orgsResp.json() as any[];
+  for (const org of orgs) {
+    let page = 1;
+    while (true) {
+      const resp = await fetch(
+        `${GITHUB_API}/orgs/${org.login}/repos?per_page=100&page=${page}&sort=updated`,
+        { headers: headers(token) }
+      );
+      if (!resp.ok) break;
+      const data = await resp.json() as any[];
+      if (data.length === 0) break;
+      for (const r of data) repos.push({ name: r.name, owner: r.owner.login });
+      page++;
+      if (page > 5) break;
+    }
   }
   return repos;
 }
@@ -237,7 +283,7 @@ export async function createCommitStatus(
 export async function createCheckRun(
   owner: string, repo: string, headSha: string,
   name: string, summary: string, details: string, token: string
-): Promise<void> {
+): Promise<boolean> {
   const resp = await fetch(`${GITHUB_API}/repos/${owner}/${repo}/check-runs`, {
     method: "POST",
     headers: { ...headers(token), "Accept": "application/vnd.github.v3+json" },
@@ -253,5 +299,5 @@ export async function createCheckRun(
       },
     }),
   });
-  // Ignore errors — checks API may not be available
+  return resp.ok;
 }

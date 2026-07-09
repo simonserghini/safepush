@@ -213,10 +213,40 @@ function isComment(line: string, path: string): boolean {
   return false;
 }
 
+function buildSuppressedChecks(lines: string[]): Map<number, Set<string>> {
+  const suppressedChecks = new Map<number, Set<string>>();
+  for (let i = 0; i < lines.length; i++) {
+    const m = lines[i].match(/safepush:\s*ignore(?:-file)?(?::(\w+))?/i);
+    if (!m) continue;
+
+    const check = m[1]?.toLowerCase();
+    const isFileWide = /ignore-file/i.test(m[0]);
+    const targetLine = isFileWide ? 0 : i + 1;
+    if (!isFileWide && targetLine >= lines.length) continue;
+
+    if (!suppressedChecks.has(targetLine)) suppressedChecks.set(targetLine, new Set());
+    const set = suppressedChecks.get(targetLine)!;
+    if (check) set.add(check);
+    else set.add("*");
+  }
+  return suppressedChecks;
+}
+
+function isSuppressed(
+  suppressedChecks: Map<number, Set<string>>,
+  lineIndex: number,
+  check: string,
+): boolean {
+  const ignores = suppressedChecks.get(lineIndex);
+  if (!ignores) return false;
+  return ignores.has("*") || ignores.has(check.toLowerCase());
+}
+
 export function scanFile(path: string, content: string, options?: ScanOptions): ScanMatch[] {
   const matches: ScanMatch[] = [];
   const lines = content.split("\n");
   const ext = path.split(".").pop()?.toLowerCase() || "";
+  const suppressedChecks = buildSuppressedChecks(lines);
 
   // ── Skip binary / vendor / lock files ──
   const skipPaths = ["node_modules/", "dist/", "build/", ".git/", "target/",
@@ -262,6 +292,7 @@ export function scanFile(path: string, content: string, options?: ScanOptions): 
   // ── Secrets (skip comments) ──
   for (const { regex, label } of SECRET_PATTERNS) {
     for (let i = 0; i < lines.length; i++) {
+      if (isSuppressed(suppressedChecks, i, "secrets")) continue;
       const line = lines[i];
       if (isComment(line, path)) continue;
       if (regex.test(line)) {
@@ -271,7 +302,7 @@ export function scanFile(path: string, content: string, options?: ScanOptions): 
         const val = line.toLowerCase();
         if (/\b(your_?|example_?|test_?|sample_?|dummy_?|changeme|replaceme|xxxx+|abcde+|12345+|password[_-]?here)/i.test(val)) continue;
         // Skip compound camelCase identifiers: formFieldInputShowPasswordButton, setApiKey, etc.
-        if (/[a-z][A-Z](?:.*(?:password|secret|token|api[_-]?key))|(?:password|secret|token|api[_-]?key).*[A-Z][a-z]/i.test(line)) continue;
+        if (/[a-z][A-Z](?:.*(?:password|secret|token|api[_-]?key))|(?:password|secret|token|api[_-]?key).*[A-Z][a-z]/.test(line)) continue;
         // Skip if the assigned value is an env var or variable reference
         const match = line.match(regex);
         if (match && match[1] && isVariableReference(match[1])) continue;
@@ -288,22 +319,25 @@ export function scanFile(path: string, content: string, options?: ScanOptions): 
   }
 
   // ── Sensitive files ──
-  const filename = path.split("/").pop() || path;
-  for (const pattern of SENSITIVE_FILE_PATTERNS) {
-    if (pattern.test(filename)) {
-      matches.push({
-        pattern: "Sensitive file",
-        line: filename,
-        path,
-        check: "sensitive_files",
-        severity: "BLOCK",
-      });
-      break;
+  if (!isSuppressed(suppressedChecks, 0, "sensitive_files")) {
+    const filename = path.split("/").pop() || path;
+    for (const pattern of SENSITIVE_FILE_PATTERNS) {
+      if (pattern.test(filename)) {
+        matches.push({
+          pattern: "Sensitive file",
+          line: filename,
+          path,
+          check: "sensitive_files",
+          severity: "BLOCK",
+        });
+        break;
+      }
     }
   }
 
   // ── Merge conflicts ──
   for (let i = 0; i < lines.length; i++) {
+    if (isSuppressed(suppressedChecks, i, "merge_conflicts")) continue;
     if (MERGE_CONFLICT_PATTERN.test(lines[i])) {
       matches.push({
         pattern: "Merge conflict marker",
@@ -320,6 +354,7 @@ export function scanFile(path: string, content: string, options?: ScanOptions): 
   for (const { regex, label, severity: sev, extensions: exts } of DEBUG_PRINT_PATTERNS) {
     if (exts && !exts.includes(ext)) continue; // per-language rule — skip if extension doesn't match
     for (let i = 0; i < lines.length; i++) {
+      if (isSuppressed(suppressedChecks, i, "debug_prints")) continue;
       const line = lines[i];
       if (isComment(line, path)) continue;
       if (regex.test(line)) {
@@ -335,37 +370,13 @@ export function scanFile(path: string, content: string, options?: ScanOptions): 
     }
   }
 
-  // ── Parse per-check inline suppressions ──
-  // "// safepush:ignore:secrets" suppresses only secrets on the next line
-  // "// safepush:ignore" suppresses all checks on the next line
-  // "# safepush:ignore:hardcoded_connections" suppresses only that check
-  const suppressedChecks: Map<number, Set<string>> = new Map();
-  for (let i = 0; i < lines.length; i++) {
-    const m = lines[i].match(/safepush:\s*ignore(?::(\w+))?/i);
-    if (m) {
-      const targetLine = i; // suppress THIS line
-      const check = m[1]?.toLowerCase(); // specific check, or undefined = all
-      if (!suppressedChecks.has(targetLine)) suppressedChecks.set(targetLine, new Set());
-      if (check) suppressedChecks.get(targetLine)!.add(check);
-      else suppressedChecks.get(targetLine)!.add("*"); // "*" means all checks
-    }
-  }
-
   // ── Single-pass: connections, absolute paths, TODO/FIXME ──
   for (let i = 0; i < lines.length; i++) {
     const line = lines[i];
-    const ignores = suppressedChecks.get(i);
-
-    // Helper: should this check be suppressed on this line?
-    function isSuppressed(check: string): boolean {
-      if (!ignores) return false;
-      return ignores.has("*") || ignores.has(check.toLowerCase());
-    }
-
     const isCommentLine = isComment(line, path);
 
     // Hardcoded connections (non-comment lines only)
-    if (!isCommentLine && !isSuppressed("hardcoded_connections")) {
+    if (!isCommentLine && !isSuppressed(suppressedChecks, i, "hardcoded_connections")) {
       for (const { regex, label } of CONNECTION_PATTERNS) {
         const m = line.match(regex);
         if (m) {
@@ -385,7 +396,7 @@ export function scanFile(path: string, content: string, options?: ScanOptions): 
     }
 
     // Absolute paths
-    if (!isSuppressed("absolute_paths") && ABSOLUTE_PATH_PATTERN.test(line)) {
+    if (!isSuppressed(suppressedChecks, i, "absolute_paths") && ABSOLUTE_PATH_PATTERN.test(line)) {
       matches.push({
         pattern: "Absolute path",
         line: line.trim().slice(0, 150),
@@ -397,7 +408,7 @@ export function scanFile(path: string, content: string, options?: ScanOptions): 
     }
 
     // TODO / FIXME (comments only)
-    if (!isSuppressed("todo_fixme") && isCommentLine && TODO_PATTERN.test(line)) {
+    if (!isSuppressed(suppressedChecks, i, "todo_fixme") && isCommentLine && TODO_PATTERN.test(line)) {
       matches.push({
         pattern: "TODO / FIXME",
         line: line.trim().slice(0, 120),
