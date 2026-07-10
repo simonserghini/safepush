@@ -35,4 +35,23 @@ describe("scanFile", () => {
     const matches = scanFile(".env", "API_KEY=test\n");
     expect(matches.some(m => m.check === "sensitive_files")).toBe(true);
   });
+
+  it("ignores bind-all and private IPs in connection config", () => {
+    const content = [
+      "app.run(host='0.0.0.0', port=5001)",
+      "app.run(host='127.0.0.1', port=5001)",
+      "app.run(host='192.168.1.10', port=5001)",
+    ].join("\n");
+    const matches = scanFile("main.py", content);
+    expect(matches.filter(m => m.check === "hardcoded_connections")).toHaveLength(0);
+  });
+
+  it("flags public IPs in connection config and URLs", () => {
+    const content = [
+      "app.run(host='93.184.216.34', port=5001)",
+      "fetch('http://8.8.8.8/health')",
+    ].join("\n");
+    const matches = scanFile("main.py", content);
+    expect(matches.filter(m => m.check === "hardcoded_connections")).toHaveLength(2);
+  });
 });

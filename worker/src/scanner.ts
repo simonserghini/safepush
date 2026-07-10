@@ -149,13 +149,35 @@ const DEBUG_PRINT_PATTERNS: DebugPattern[] = [
 const MERGE_CONFLICT_PATTERN = /^(<<<<<<<|=======|>>>>>>>)/;
 
 // ── Hardcoded connection patterns ──
-const CONNECTION_PATTERNS = [
+interface ConnectionPattern {
+  regex: RegExp;
+  label: string;
+  // When set, only flag if the captured IPv4 is public/routable (not loopback, bind-all, or RFC1918).
+  ipGroup?: number;
+}
+
+const CONNECTION_PATTERNS: ConnectionPattern[] = [
   { regex: /\b(postgres|postgresql|mysql|mariadb|mongodb(\+srv)?|redis|sqlite|cockroachdb|mssql):\/\/[^\s]+/i, label: "Database URL" },
   { regex: /\bjdbc:[^\s]+/i, label: "JDBC connection string" },
-  { regex: /(?:https?|ftp|tcp|udp|ws|wss):\/\/([0-9]{1,3}\.){3}[0-9]{1,3}\b/, label: "Hardcoded IP in URL" },
-  { regex: /\b(?:host|server|bind|listen|address|endpoint|proxy|connect)\s*[=:]\s*['"]?([0-9]{1,3}\.){3}[0-9]{1,3}/i, label: "Hardcoded IP in connection config" },
+  { regex: /(?:https?|ftp|tcp|udp|ws|wss):\/\/((?:[0-9]{1,3}\.){3}[0-9]{1,3})\b/, label: "Hardcoded IP in URL", ipGroup: 1 },
+  { regex: /\b(?:host|server|bind|listen|address|endpoint|proxy|connect)\s*[=:]\s*['"]?((?:[0-9]{1,3}\.){3}[0-9]{1,3})/i, label: "Hardcoded IP in connection config", ipGroup: 1 },
   { regex: /\b(amqp|mqtt|kafka):\/\/[^\s]+/i, label: "Message queue URL" },
 ];
+
+function isLocalOrPrivateIp(ip: string): boolean {
+  const parts = ip.split(".").map(Number);
+  if (parts.length !== 4 || parts.some((p) => Number.isNaN(p) || p < 0 || p > 255)) return true;
+
+  const [a, b] = parts;
+  if (a === 0) return true; // 0.0.0.0/8 — bind-all / unspecified
+  if (a === 10) return true; // 10.0.0.0/8
+  if (a === 127) return true; // loopback
+  if (a === 169 && b === 254) return true; // link-local
+  if (a === 172 && b >= 16 && b <= 31) return true; // 172.16.0.0/12
+  if (a === 192 && b === 168) return true; // 192.168.0.0/16
+  if (parts.every((p) => p === 255)) return true; // broadcast
+  return false;
+}
 
 // ── Absolute path pattern ──
 const ABSOLUTE_PATH_PATTERN = /^["']?\/home\/[^\s"']+/;
@@ -377,21 +399,23 @@ export function scanFile(path: string, content: string, options?: ScanOptions): 
 
     // Hardcoded connections (non-comment lines only)
     if (!isCommentLine && !isSuppressed(suppressedChecks, i, "hardcoded_connections")) {
-      for (const { regex, label } of CONNECTION_PATTERNS) {
+      for (const { regex, label, ipGroup } of CONNECTION_PATTERNS) {
         const m = line.match(regex);
-        if (m) {
-          const matched = m[0];
-          if (!/^(?:localhost|127\.0\.0\.1|0\.0\.0\.0|::1)$/.test(matched)) {
-            matches.push({
-              pattern: label,
-              line: line.trim().slice(0, 150),
-              lineNumber: i + 1,
-              path,
-              check: "hardcoded_connections",
-              severity: "WARN",
-            });
-          }
+        if (!m) continue;
+
+        if (ipGroup !== undefined) {
+          const ip = m[ipGroup];
+          if (!ip || isLocalOrPrivateIp(ip)) continue;
         }
+
+        matches.push({
+          pattern: label,
+          line: line.trim().slice(0, 150),
+          lineNumber: i + 1,
+          path,
+          check: "hardcoded_connections",
+          severity: "WARN",
+        });
       }
     }
 

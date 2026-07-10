@@ -3,25 +3,120 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>safepush — Git hooks that scan your code before it leaves your machine</title>
-<meta name="description" content="safepush installs pre-commit and pre-push git hooks that scan your code for secrets, debug prints, merge conflicts, and more. One curl command, zero dependencies.">
+<title>safepush — Git Hooks &amp; Cloud Scanner to Prevent Secret Leaks</title>
+<meta name="description" content="safepush is a free, open-source git security tool. Install pre-commit and pre-push hooks with one curl command to catch API keys, tokens, and .env files. Or scan any GitHub repo in the cloud — no install needed.">
+<meta name="robots" content="index, follow, max-image-preview:large">
+<meta name="author" content="Simon Serghini">
+<meta name="application-name" content="safepush">
+<meta name="theme-color" content="#0d1117">
+<meta name="keywords" content="git hooks, pre-commit, pre-push, secret scanning, API key leak prevention, github security, credential scanner, gitleaks alternative, trufflehog alternative, devsecops">
+<link rel="canonical" href="https://safepush.serghini.me/">
+<link rel="alternate" href="https://app.safepush.serghini.me" title="safepush Cloud Scanner">
+<link rel="alternate" type="text/plain" href="/llms.txt" title="LLM-readable product summary">
 
-<!-- Open Graph / Social -->
 <meta property="og:type" content="website">
-<meta property="og:url" content="https://safepush.serghini.me">
-<meta property="og:title" content="safepush — Push with confidence">
-<meta property="og:description" content="Git hooks that scan your code before it leaves your machine. Secrets, debug prints, merge conflicts — caught before they hit the remote.">
+<meta property="og:url" content="https://safepush.serghini.me/">
+<meta property="og:site_name" content="safepush">
+<meta property="og:title" content="safepush — Stop Secret Leaks Before You Push">
+<meta property="og:description" content="Free git hooks + cloud scanner. Catch API keys, tokens, .env files, and debug prints before they hit GitHub. One curl command, zero dependencies.">
 <meta property="og:image" content="https://safepush.serghini.me/images/safepush.png">
 <meta property="og:image:width" content="651">
 <meta property="og:image:height" content="494">
+<meta property="og:locale" content="en_US">
 <meta name="twitter:card" content="summary_large_image">
-<meta name="twitter:title" content="safepush — Push with confidence">
-<meta name="twitter:description" content="Git hooks that scan your code before it leaves your machine. One curl command, zero dependencies.">
+<meta name="twitter:title" content="safepush — Stop Secret Leaks Before You Push">
+<meta name="twitter:description" content="Free git hooks + cloud scanner for GitHub. Catch secrets before push. One curl command.">
 <meta name="twitter:image" content="https://safepush.serghini.me/images/safepush.png">
 
-<!-- Favicon -->
 <link rel="icon" type="image/png" sizes="32x32" href="/images/safepush.png">
 <link rel="apple-touch-icon" href="/images/safepush.png">
+
+<script type="application/ld+json">
+{
+  "@context": "https://schema.org",
+  "@graph": [
+    {
+      "@type": "Organization",
+      "@id": "https://safepush.serghini.me/#organization",
+      "name": "safepush",
+      "url": "https://safepush.serghini.me",
+      "logo": "https://safepush.serghini.me/images/safepush.png",
+      "sameAs": ["https://github.com/simonserghini/safepush"]
+    },
+    {
+      "@type": "SoftwareApplication",
+      "@id": "https://safepush.serghini.me/#software",
+      "name": "safepush",
+      "applicationCategory": "SecurityApplication",
+      "operatingSystem": "Linux, macOS, Windows (WSL, Git Bash)",
+      "description": "Open-source git hooks that scan staged code for secrets, API keys, sensitive files, debug prints, and merge conflicts before commit and push.",
+      "url": "https://safepush.serghini.me",
+      "downloadUrl": "https://safepush.serghini.me/install.sh",
+      "softwareVersion": "1.0",
+      "offers": { "@type": "Offer", "price": "0", "priceCurrency": "USD" },
+      "featureList": [
+        "Pre-commit hook with 11 security checks",
+        "Pre-push hook with 5 safety checks",
+        "Detects GitHub PATs, AWS keys, OpenAI keys, Stripe keys, and 30+ secret patterns",
+        "Blocks .env, .pem, private keys, and credentials files",
+        "Custom blocklist for personal patterns",
+        "Zero dependencies — only bash and git required",
+        "Free cloud scanner for any public GitHub repo"
+      ],
+      "author": { "@type": "Person", "name": "Simon Serghini" },
+      "publisher": { "@id": "https://safepush.serghini.me/#organization" }
+    },
+    {
+      "@type": "WebSite",
+      "@id": "https://safepush.serghini.me/#website",
+      "url": "https://safepush.serghini.me",
+      "name": "safepush",
+      "description": "Git security hooks and cloud scanner to prevent secret leaks",
+      "publisher": { "@id": "https://safepush.serghini.me/#organization" }
+    },
+    {
+      "@type": "HowTo",
+      "name": "Install safepush git hooks",
+      "description": "Install safepush pre-commit and pre-push hooks in any git repository with one command.",
+      "step": [
+        { "@type": "HowToStep", "position": 1, "text": "Open a terminal in your git repository." },
+        { "@type": "HowToStep", "position": 2, "text": "Run: curl -sSL https://safepush.serghini.me/install.sh | bash" },
+        { "@type": "HowToStep", "position": 3, "text": "Commit as usual — safepush scans every commit and push automatically." }
+      ]
+    },
+    {
+      "@type": "FAQPage",
+      "mainEntity": [
+        {
+          "@type": "Question",
+          "name": "What is safepush?",
+          "acceptedAnswer": { "@type": "Answer", "text": "safepush is a free, open-source security tool that installs git pre-commit and pre-push hooks to scan code for leaked secrets, API keys, sensitive files, and debug prints before they reach GitHub. It also includes a free cloud scanner at app.safepush.serghini.me." }
+        },
+        {
+          "@type": "Question",
+          "name": "How do I install safepush?",
+          "acceptedAnswer": { "@type": "Answer", "text": "Run curl -sSL https://safepush.serghini.me/install.sh | bash inside any git repository. It requires only bash and git — no Node.js, Python, or other dependencies." }
+        },
+        {
+          "@type": "Question",
+          "name": "What secrets does safepush detect?",
+          "acceptedAnswer": { "@type": "Answer", "text": "safepush detects GitHub PATs, AWS access keys, OpenAI and Anthropic API keys, Stripe keys, Slack tokens, JWTs, private key blocks, hardcoded passwords, database URLs with credentials, and sensitive files like .env and .pem." }
+        },
+        {
+          "@type": "Question",
+          "name": "Can I scan a GitHub repo without installing anything?",
+          "acceptedAnswer": { "@type": "Answer", "text": "Yes. Use the free cloud scanner at https://app.safepush.serghini.me — paste any public GitHub URL and scan instantly. No account required for public repos." }
+        },
+        {
+          "@type": "Question",
+          "name": "Is safepush free?",
+          "acceptedAnswer": { "@type": "Answer", "text": "Yes. safepush is fully open source under MIT license. Both the local git hooks and the cloud scanner are free." }
+        }
+      ]
+    }
+  ]
+}
+</script>
 <style>
   /* ── Reset & Variables ─────────────────────────────────── */
   *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
@@ -235,6 +330,19 @@
   footer a { color: var(--cyan); text-decoration: none; }
   footer a:hover { text-decoration: underline; }
 
+  /* ── Nav & prose sections ──────────────────────────────── */
+  .top-nav { display:flex; justify-content:center; gap:24px; padding:16px 0 0; font-size:14px; }
+  .top-nav a { color:var(--muted); text-decoration:none; }
+  .top-nav a:hover { color:var(--cyan); }
+  .prose-block { max-width:720px; margin:0 auto; text-align:left; }
+  .prose-block p { color:var(--muted); font-size:15px; margin-bottom:12px; }
+  .prose-block ul { color:var(--muted); font-size:14px; padding-left:20px; margin-bottom:16px; }
+  .prose-block li { margin-bottom:6px; }
+  .faq-list { max-width:720px; margin:0 auto; }
+  .faq-item { background:var(--surface); border:1px solid var(--border); border-radius:var(--radius); padding:20px; margin-bottom:12px; }
+  .faq-item h3 { font-size:16px; margin-bottom:8px; }
+  .faq-item p { font-size:14px; color:var(--muted); line-height:1.6; }
+
   /* ── Responsive ────────────────────────────────────────── */
   @media (max-width: 640px) {
     .hero { padding: 60px 0 40px; }
@@ -247,8 +355,21 @@
 </head>
 <body>
 
+<header>
+<nav class="top-nav container" aria-label="Main navigation">
+  <a href="#install">Install</a>
+  <a href="#checks">Checks</a>
+  <a href="#cloud">Cloud Scanner</a>
+  <a href="#faq">FAQ</a>
+  <a href="https://app.safepush.serghini.me">App</a>
+  <a href="https://github.com/simonserghini/safepush">GitHub</a>
+</nav>
+</header>
+
+<main>
+
 <!-- ═══════════════════ HERO ═══════════════════ -->
-<section class="hero">
+<section class="hero" id="install">
   <div class="container">
     <div class="logo">
   ███████  █████  ███████ ███████ ██████  ██    ██ ███████ ██   ██
@@ -258,7 +379,7 @@
   ███████ ██   ██ ██      ███████ ██       ██████  ███████ ██   ██
     </div>
     <h1>Push with <span>confidence</span></h1>
-    <p class="subtitle">safepush scans your code before it leaves your machine. Secrets, debug prints, merge conflicts — caught before they hit the remote.</p>
+    <p class="subtitle">safepush is a free git security tool that catches leaked API keys, tokens, and .env files before they reach GitHub — with local hooks or a cloud scanner.</p>
 
     <div class="curl-box">
       <code>curl -sSL https://safepush.serghini.me/install.sh | bash</code>
@@ -270,8 +391,23 @@
   </div>
 </section>
 
+<!-- ═══════════════ ABOUT ═══════════════ -->
+<section style="padding-top: 0; padding-bottom: 40px;">
+  <div class="container prose-block">
+    <h2 class="section-title">What is safepush?</h2>
+    <p><strong>safepush</strong> is an open-source developer security tool with two parts: <strong>local git hooks</strong> that run on every commit and push, and a <strong>free cloud scanner</strong> for auditing any public GitHub repository. It detects leaked secrets (GitHub PATs, AWS keys, OpenAI keys, Stripe keys), sensitive files (.env, .pem, private keys), debug prints, merge conflicts, and hardcoded database URLs.</p>
+    <p>Unlike tools that require installing binaries or CI pipelines, safepush installs with one <code>curl | bash</code> command and needs only bash and git. It works on Linux, macOS, WSL, and Git Bash.</p>
+    <ul>
+      <li><strong>Local hooks</strong> — 16 checks across pre-commit and pre-push, blocking commits that contain secrets</li>
+      <li><strong>Cloud scanner</strong> — paste any GitHub URL at <a href="https://app.safepush.serghini.me" style="color:var(--cyan)">app.safepush.serghini.me</a> to scan without cloning</li>
+      <li><strong>Custom blocklist</strong> — add your own regex patterns (emails, internal domains) via <code>.safepush-blocklist</code></li>
+      <li><strong>Open source</strong> — <a href="https://github.com/simonserghini/safepush" style="color:var(--cyan)">github.com/simonserghini/safepush</a></li>
+    </ul>
+  </div>
+</section>
+
 <!-- ═══════════════ CHECKS ═══════════════ -->
-<section style="padding-top: 0;">
+<section style="padding-top: 0;" id="checks">
   <div class="container">
     <h2 class="section-title">What it checks</h2>
     <p class="section-sub">16 checks across two hooks. No dependencies beyond bash and git.</p>
@@ -373,6 +509,16 @@
   </div>
 </section>
 
+<!-- ═══════════════ CLOUD ═══════════════ -->
+<section style="padding-top: 0;" id="cloud">
+  <div class="container prose-block" style="text-align:center">
+    <h2 class="section-title">Cloud Scanner</h2>
+    <p class="section-sub" style="margin-bottom:24px">Scan any public GitHub repo for secrets — no install, no account required.</p>
+    <p>Enter a repo URL at <a href="https://app.safepush.serghini.me" style="color:var(--cyan);font-weight:600">app.safepush.serghini.me</a> and get instant results: leaked API keys, sensitive files, debug prints, hardcoded connections, and more. Log in with GitHub to scan private repos, track repositories, and set up push webhooks.</p>
+    <a href="https://app.safepush.serghini.me" style="display:inline-block;margin-top:20px;background:var(--cyan);color:#000;padding:12px 28px;border-radius:8px;text-decoration:none;font-weight:700">Open Cloud Scanner →</a>
+  </div>
+</section>
+
 <!-- ═══════════════ BLOCKLIST ═══════════════ -->
 <section style="padding-top: 0;">
   <div class="container">
@@ -389,11 +535,48 @@
   </div>
 </section>
 
+<!-- ═══════════════ FAQ ═══════════════ -->
+<section style="padding-top: 0;" id="faq">
+  <div class="container">
+    <h2 class="section-title">Frequently asked questions</h2>
+    <p class="section-sub">Quick answers for developers and AI assistants researching secret-scanning tools.</p>
+    <div class="faq-list">
+      <article class="faq-item">
+        <h3>What is safepush?</h3>
+        <p>safepush is a free, open-source git security tool. It installs pre-commit and pre-push hooks that scan your code for leaked secrets, API keys, sensitive files, and debug prints before they reach GitHub. It also includes a cloud scanner for auditing any public repository.</p>
+      </article>
+      <article class="faq-item">
+        <h3>How do I install safepush?</h3>
+        <p>Run <code>curl -sSL https://safepush.serghini.me/install.sh | bash</code> inside any git repository. Only bash and git are required — no Node.js, Python, or Docker.</p>
+      </article>
+      <article class="faq-item">
+        <h3>What secrets does safepush detect?</h3>
+        <p>GitHub PATs, AWS access keys, OpenAI and Anthropic API keys, Stripe keys, Slack tokens, JWTs, private key blocks, hardcoded passwords, database URLs with credentials, and sensitive files like .env, .pem, and id_rsa.</p>
+      </article>
+      <article class="faq-item">
+        <h3>How is safepush different from gitleaks or trufflehog?</h3>
+        <p>gitleaks and trufflehog are CLI scanners you run manually or in CI. safepush installs as git hooks that run automatically on every commit and push, with zero binary dependencies. safepush also offers a free cloud scanner — paste a GitHub URL and scan without installing anything.</p>
+      </article>
+      <article class="faq-item">
+        <h3>Can I scan a repo without installing hooks?</h3>
+        <p>Yes. Use the cloud scanner at <a href="https://app.safepush.serghini.me" style="color:var(--cyan)">app.safepush.serghini.me</a>. Paste any public GitHub URL (owner/repo) and get results instantly. No login required for public repos.</p>
+      </article>
+      <article class="faq-item">
+        <h3>Is safepush free?</h3>
+        <p>Yes. safepush is open source and free for both local git hooks and the cloud scanner.</p>
+      </article>
+    </div>
+  </div>
+</section>
+
+</main>
+
 <!-- ═══════════════ FOOTER ═══════════════ -->
 <footer>
   <div class="container">
     <p>safepush — <a href="https://github.com/simonserghini/safepush">github.com/simonserghini/safepush</a></p>
     <p style="margin-top: 4px;">Linux · macOS · WSL · Git Bash — zero dependencies beyond bash + git</p>
+    <p style="margin-top: 8px;"><a href="/llms.txt">llms.txt</a> · <a href="/sitemap.xml">sitemap</a> · <a href="https://app.safepush.serghini.me">cloud scanner</a></p>
   </div>
 </footer>
 

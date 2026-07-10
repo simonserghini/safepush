@@ -32,6 +32,10 @@ import {
   escapeHtml, escapeJs, validateRepoSlug, parseJsonSafe,
   checkRateLimit, clientIp, mapConcurrent,
 } from "./utils";
+import {
+  renderSeoHead, renderAppJsonLd,
+  APP_ROBOTS_TXT, APP_SITEMAP_XML, LLMS_TXT, SITE,
+} from "./seo";
 
 export interface Env {
   SCANS: KVNamespace;
@@ -727,7 +731,7 @@ async function handleTrackedScan(request: Request, env: Env): Promise<Response> 
 
 // ── Quick scan result page ─────────────────────────────────
 
-async function handleQuickScanResult(owner: string, repo: string, env: Env): Promise<Response> {
+async function handleQuickScanResult(owner: string, repo: string, env: Env, request: Request): Promise<Response> {
   const ownerErr = validateRepoSlug(owner, "owner");
   const repoErr = validateRepoSlug(repo, "repo");
   if (ownerErr || repoErr) {
@@ -764,9 +768,15 @@ h1{color:#f85149}a{color:#58a6ff}</style></head><body>
       }).join("")
     + (result.matches.length > 100 ? `<div style="padding:6px 12px;font-size:12px;color:#8b949e">... and ${result.matches.length - 100} more</div>` : "");
 
+  const cfg = await loadConfig(env);
+  const baseUrl = resolveBaseUrl(cfg, request);
+  const scanTitle = `${owner}/${repo} — safepush scan results`;
+  const scanDesc = `Secret scan results for ${owner}/${repo} on safepush. ${result.matches.length} finding(s) across ${result.totalFiles} files.`;
+
   return html(`<!DOCTYPE html><html lang="en"><head>
 <meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1.0">
-<title>${escapeHtml(env.DASHBOARD_TITLE)} — ${escapeHtml(owner)}/${escapeHtml(repo)}</title>
+<title>${escapeHtml(scanTitle)}</title>
+${renderSeoHead({ title: scanTitle, description: scanDesc, url: `${baseUrl}/quick-scan?q=${encodeURIComponent(`${owner}/${repo}`)}`, noindex: true })}
 <style>
 *{box-sizing:border-box;margin:0;padding:0}
 body{background:#0d1117;color:#e6edf3;font-family:system-ui;min-height:100vh}
@@ -939,12 +949,18 @@ async function handleDashboardUI(request: Request, env: Env): Promise<Response> 
         <td><button onclick="removeRepoBtn('${escapeJs(r.owner)}','${escapeJs(r.repo)}')" style="background:none;border:none;color:#f85149;cursor:pointer;font-size:16px">&times;</button></td>
       </tr>`).join("");
 
+  const pageTitle = "safepush Cloud Scanner — Scan GitHub Repos for Secrets";
+  const pageDesc = "Free cloud scanner for GitHub repositories. Detect leaked API keys, tokens, .env files, debug prints, and hardcoded credentials. Scan any public repo instantly — no install needed.";
+  const pageUrl = `${baseUrl}/`;
+
   return html(`<!DOCTYPE html>
 <html lang="en">
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>${escapeHtml(title)} — dashboard</title>
+<title>${escapeHtml(pageTitle)}</title>
+${renderSeoHead({ title: pageTitle, description: pageDesc, url: pageUrl, type: "webapp" })}
+${renderAppJsonLd(baseUrl)}
 <style>
   * { box-sizing:border-box; margin:0; padding:0; }
   body { background:#0d1117; color:#e6edf3; font-family:system-ui; min-height:100vh; }
@@ -1010,9 +1026,11 @@ async function handleDashboardUI(request: Request, env: Env): Promise<Response> 
   </div>
 
   ${!sessionId ? `<div style="text-align:center;padding:40px 0">
-    <h1>safepush</h1>
-    <p style="color:#8b949e;margin:16px 0 32px">Track and scan your GitHub repos for secrets, debug prints, and more.</p>
+    <h1>safepush Cloud Scanner</h1>
+    <p style="color:#8b949e;margin:16px 0 12px;max-width:560px;margin-left:auto;margin-right:auto">Free secret scanner for GitHub repositories. Detect leaked API keys, AWS credentials, .env files, private keys, debug prints, and hardcoded database URLs — before they spread.</p>
+    <p style="color:#484f58;font-size:13px;margin-bottom:32px">Use Quick Scan above for public repos. Log in to scan private repos and track repositories.</p>
     <a href="/login" class="btn btn-green" style="display:inline-block;text-decoration:none;font-size:16px;padding:14px 36px">🔑 Login with GitHub</a>
+    <p style="margin-top:24px;font-size:13px;color:#484f58"><a href="${escapeHtml(SITE.landing)}" style="color:#58a6ff">Install local git hooks</a> · <a href="${escapeHtml(SITE.github)}" style="color:#58a6ff">Source code</a></p>
   </div>` : `
   <h1>📋 Tracked Repos</h1>
 
@@ -1178,6 +1196,10 @@ function trackAll(){
 }
 </script>
 
+<footer style="text-align:center;padding:32px 24px;color:#484f58;font-size:12px;border-top:1px solid #21262d;margin-top:48px">
+  <p>safepush — <a href="${escapeHtml(SITE.landing)}" style="color:#58a6ff">landing page</a> · <a href="${escapeHtml(SITE.github)}" style="color:#58a6ff">GitHub</a> · <a href="/llms.txt" style="color:#58a6ff">llms.txt</a></p>
+</footer>
+
 </body></html>`);
 }
 
@@ -1234,7 +1256,7 @@ export default {
         const simpleUser = q.match(/^([^\/\s]+)$/);
         if (repoMatch || simpleMatch) {
           const m = repoMatch || simpleMatch!;
-          return handleQuickScanResult(m[1], m[2], env);
+          return handleQuickScanResult(m[1], m[2], env, request);
         } else if (userMatch || simpleUser) {
           const u = (userMatch || simpleUser)![1];
           return handleProfilePage(u, env, request);
@@ -1254,6 +1276,17 @@ export default {
       if (method === "GET"  && path === "/my-repos")           { const r = await handleMyRepos(request, env); Object.entries(c).forEach(([k,v]) => r.headers.set(k,v)); return r; }
       const trackedRemoveMatch = path.match(/^\/tracked\/([^/]+)\/([^/]+)$/);
       if (method === "DELETE" && trackedRemoveMatch) { const r = await handleTrackedRemove(trackedRemoveMatch[1], trackedRemoveMatch[2], request, env); Object.entries(c).forEach(([k,v]) => r.headers.set(k,v)); return r; }
+
+      // SEO / GEO discovery files
+      if (method === "GET" && path === "/robots.txt") {
+        return new Response(APP_ROBOTS_TXT, { headers: { "content-type": "text/plain; charset=utf-8" } });
+      }
+      if (method === "GET" && path === "/sitemap.xml") {
+        return new Response(APP_SITEMAP_XML, { headers: { "content-type": "application/xml; charset=utf-8" } });
+      }
+      if (method === "GET" && path === "/llms.txt") {
+        return new Response(LLMS_TXT, { headers: { "content-type": "text/plain; charset=utf-8" } });
+      }
 
       // Dashboard UI (also at /app for backwards compat)
       if (method === "GET" && (path === "/" || path === "/app")) return handleDashboardUI(request, env);
